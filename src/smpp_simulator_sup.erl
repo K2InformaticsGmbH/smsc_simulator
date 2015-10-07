@@ -1,4 +1,7 @@
--module(ucp_simulator_sup).
+-module(smpp_simulator_sup).
+
+-include("logger.hrl").
+
 -behaviour(supervisor).
 
 -export([start_link/0, start_child/0]).
@@ -15,18 +18,19 @@ start_link() ->
 
 init([]) ->
     Port = get_app_env(listen_port, ?DEFAULT_PORT),
+    ?SYS_INFO("Creating SMPP server instance on port ~p~n", [Port]),
     {ok, ListenSocket} = gen_tcp:listen(Port, ?TCP_OPTIONS),
     {ok, {{simple_one_for_one, 10, 60},
-         [{ucp_server,
-          {ucp_server, start_link, [ListenSocket]},
-          temporary, 1000, worker, [ucp_server]}
+         [{smpp_server,
+          {smpp_server, start_link, [ListenSocket]},
+          temporary, 1000, worker, [smpp_server]}
          ]}}.
 
 start_child() ->
     supervisor:start_child(?MODULE, []).
 
 get_app_env(Opt, Default) ->
-    case application:get_env(ucp_simulator, Opt) of
+    case application:get_env(smpp_simulator, Opt) of
         {ok, Val} -> Val;
         _ -> Default
     end.

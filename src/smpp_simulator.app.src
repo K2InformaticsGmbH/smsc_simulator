@@ -1,0 +1,16 @@
+%% ex: ts=4 sw=4 et
+{application, smpp_simulator,
+ [
+  {description, "SMPP protocol simulator"},
+  {vsn, "1.0"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, {smpp_simulator_app, []}},
+  {env, [
+            %% listening TCP port (default: 8888)
+            {listen_port, 8888}
+        ]}
+ ]}.

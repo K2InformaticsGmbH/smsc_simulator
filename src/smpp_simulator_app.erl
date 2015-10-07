@@ -1,4 +1,4 @@
--module(ucp_simulator_app).
+-module(smpp_simulator_app).
 
 -behaviour(application).
 
@@ -8,16 +8,16 @@
 -include("logger.hrl").
 
 start() ->
-    application:start(ucp_simulator).
+    application:start(smpp_simulator).
 
 %% ===================================================================
 %% Application callbacks
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-    case ucp_simulator_sup:start_link() of
+    case smpp_simulator_sup:start_link() of
       {ok, _} ->
-          ucp_simulator_sup:start_child();
+          smpp_simulator_sup:start_child();
       Other ->
           {error, Other}
     end.
