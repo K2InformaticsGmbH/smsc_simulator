@@ -8,9 +8,9 @@ else
     #exename='erl.exe'
 fi
 
-listen_port="-ucp_simulator listen_port $1"
+listen_port="-smpp_simulator listen_port $1"
 if [ "$#" -ne 1 ]; then
     listen_port=""
 fi
 
-$exename -pa deps/*/ebin -pa ebin $listen_port -boot start_sasl -s lager -s smpp_simulator_app
+$exename -sname $1 -pa deps/*/ebin -pa ebin $listen_port -boot start_sasl -s lager -s smpp_simulator_app
