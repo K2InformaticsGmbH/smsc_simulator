@@ -1,51 +1,15 @@
-EMI/UCP simulator - A hunky Erlang emulating ERMES/UCP-based EMI protocol server
+SMPP simulator - A hunky Erlang emulating SMPP protocol server
 ================================================================================
 
-The simulator is an application for near-to-live testing of your EMI/UCP
+The simulator is an application for near-to-live testing of your SMPP
 applications without need of access to real SMSC. The application behaves as
-a real SMSC with UCP interface. Your application can bind to it, send messages,
+a real SMSC with SMPP interface. Your application can bind to it, send messages,
 etc., however nothing will get delivered anywhere as all the responses are
 only made-up by the simulator.
 
-The simulator is based on LogicaCMG's EMI/UCP interface 4.6 specification.
-
 If you like this project, you might also be interested in [jtendo UCP Gateway](https://github.com/jtendo/ucp_gateway)
-
-Usage
------
-
-1. Install:
-
-    ```
-    $ make initenv
-    ```
-    
-2. Run
-
-    ```
-    $ make run
-    ```
 
 Configuration
 -------------
 
-- `listen_port`: the listening port (default: 7777)
-
-
-TODO
-----
-
-- TRN checking
-- Syntax checking
-- UCP windowing (flow control)
-- Concatenated messages checking
-- Sending messages from server to clients (CMD 52)
-- Delivery notifications
-- ...
-
-
-License
--------
-
-BSD License -- http://www.opensource.org/licenses/bsd-license.php
-
+- `listen_port`: the listening port (default: 8888)

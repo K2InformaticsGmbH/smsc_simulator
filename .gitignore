@@ -6,3 +6,5 @@ deps
 *.swp
 ebin/
 log/
+*.plt
+.rebar
