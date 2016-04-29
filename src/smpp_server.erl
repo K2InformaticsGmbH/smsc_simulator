@@ -15,11 +15,9 @@
 
 %% API
 -export([start_link/1,
-         stop/0,
-         send_message/1]).
+         stop/1,
+         send_message/5]).
 
-
--define(SERVER, ?MODULE).
 
 -record(state, {port,  % listening port
                 lsock, % listening socket
@@ -36,11 +34,26 @@
 start_link(LSock) ->
     gen_server:start_link(?MODULE, [LSock], []).
 
-stop() ->
-    gen_server:cast(?SERVER, stop).
+stop(Server) ->
+    gen_server:cast(Server, stop).
 
-send_message(Msg) ->
-    gen_server:cast(?SERVER, {send_message, Msg}).
+send_message(Server, Seq, Src, Dst, Msg)
+  when is_integer(Seq), is_integer(Src), is_integer(Dst), is_list(Msg) ->
+    case whereis(Server) of
+        undefined -> ?SYS_ERROR("SMSC ~p is dead", [Server]);
+        Pid ->
+            {ok, Pdu} =
+            smpp_operation:pack(
+              {?COMMAND_ID_DELIVER_SM, 0, Seq,
+               [{short_message,Msg},{sm_default_msg_id,0},{data_coding,0},
+                {replace_if_present_flag,0},{registered_delivery,0},
+                {validity_period,[]},{schedule_delivery_time,[]},
+                {priority_flag,1},{protocol_id,0},{esm_class,0},
+                {destination_addr,integer_to_list(Dst)},{dest_addr_npi,1},
+                {dest_addr_ton,1},{source_addr, integer_to_list(Src)},
+                {source_addr_npi,1},{source_addr_ton,1},{service_type,[]}]}),
+            gen_server:cast(Pid, {send_message, list_to_binary(Pdu)})
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -49,6 +62,7 @@ send_message(Msg) ->
 init([LSock]) ->
     ?SYS_INFO("Initializing SMPP server~n", []),
     gen_server:cast(self(), accept),
+    process_flag(trap_exit, true),
     {ok, #state{lsock = LSock, trn = 0}}.
 
 handle_call(Msg, From, State) ->
@@ -57,33 +71,43 @@ handle_call(Msg, From, State) ->
 
 handle_cast(accept, State = #state{lsock = S}) ->
     {ok, Sock} = gen_tcp:accept(S),
-    smpp_simulator_sup:start_child(),
+    smpp_simulator:start_child(),
     ?SYS_INFO("Accepting: ~p", [Sock]),
     {noreply, State#state{sock = Sock}};
 
-handle_cast({send_message, _Msg}, State) ->
-    % TODO: implement this
+handle_cast({send_message, Msg}, State = #state{sock = Sock}) ->
+    case catch send(Sock, Msg) of
+        ok -> ok;
+        Error -> ?SYS_ERROR("Send failed: ~p~n~p", [Msg, Error])
+    end,
     {noreply, State};
 
 handle_cast(stop, State) ->
     {stop, normal, State}.
 
-handle_info({tcp, Socket, Data}, State = #state{buffer = B}) ->
+handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock}) ->
     {Messages, Incomplete} = try_decode(Data, B),
-    [handle_data(Socket, M) || M <- Messages],
+    [handle_data(Sock, M) || M <- Messages],
     {noreply, State#state{buffer = Incomplete}};
 
+handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
+    ?SYS_WARN("Socket ~p closed.", [Sock]),
+    {stop, normal, State};
 handle_info({tcp_closed, Socket}, State) ->
-    ?SYS_WARN("Socket ~p closed.", [Socket]),
-    smpp_simulator_sup:start_child(),
-    {noreply, State};
+    ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
+    {stop, normal, State};
 
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(Reason, _State) ->
+    case [P || P <- registered(), whereis(P) == self()] of
+        [RegName] ->
+            ?SYS_INFO("~p : ~p", [RegName, Reason]);
+        _ ->
+            ?SYS_INFO("~p", [Reason])
+    end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -115,7 +139,18 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
         _ -> {PDUs, Buffer}
     end.
 
-handle_data(Socket, Pdu) ->
+handle_data(Socket, {C,_,_,B} = Pdu) ->
+    case lists:member(C, [?COMMAND_ID_BIND_RECEIVER,
+                          ?COMMAND_ID_BIND_TRANSCEIVER,
+                          ?COMMAND_ID_BIND_TRANSMITTER]) of
+        true ->
+            RegName = list_to_atom(
+                        lists:flatten([atom_to_list(?MODULE),"_",
+                                       proplists:get_value(system_id,B)])),
+            erlang:register(RegName, self()),
+            ?SYS_INFO("SMSC : ~p", [RegName]);
+        false -> ok
+    end,
     ?SYS_INFO("Req : ~p", [cmd(Pdu)]),
     case handle_message(Pdu) of
         {reply, Resp} ->
@@ -129,11 +164,15 @@ handle_data(Socket, Pdu) ->
                 _:Error ->
                     ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
             end;
-        _ -> ignore
+        _ ->
+            inet:setopts(Socket, [{active, once}])
     end.
 
 handle_message({CmdId,Status,SeqNum,Body}) ->
-    {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
+    if CmdId band 16#80000000 == 0 ->
+           {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
+       true -> ignore
+    end;
 handle_message(Pdu) ->
     {reply, Pdu}.
 

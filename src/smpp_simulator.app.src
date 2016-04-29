@@ -8,7 +8,7 @@
                   kernel,
                   stdlib
                  ]},
-  {mod, {smpp_simulator_app, []}},
+  {mod, {smpp_simulator, []}},
   {env, [
             %% listening TCP port (default: 8888)
             {listen_port, 8888}
