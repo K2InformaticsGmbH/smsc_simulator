@@ -16,8 +16,8 @@
 %% API
 -export([start_link/1,
          stop/1,
-         send_message/5]).
-
+         send_message/5,
+         try_decode/2, cmd/1]).
 
 -record(state, {port,  % listening port
                 lsock, % listening socket
