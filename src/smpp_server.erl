@@ -92,6 +92,10 @@ handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock}) ->
 
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     ?SYS_WARN("Socket ~p closed.", [Sock]),
+    case [P || P <- registered(), whereis(P) == self()] of
+        [_RegName] -> ok;
+        _ -> smpp_simulator:start_child()
+    end,
     {stop, normal, State};
 handle_info({tcp_closed, Socket}, State) ->
     ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
