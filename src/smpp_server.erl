@@ -96,7 +96,8 @@ handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
 handle_info({tcp_closed, Socket}, State) ->
     ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
     {stop, normal, State};
-
+handle_info({'EXIT', _, Reason}, State) ->
+    {stop, Reason, State};
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
