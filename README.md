@@ -13,3 +13,22 @@ Configuration
 -------------
 
 - `listen_port`: the listening port (default: 8888)
+
+Example
+-------
+```erlang
+%% Client
+%% ------
+smpp_client:start("4115", {127,0,0,1}, 4040).
+smpp_client:bind("4115").
+smpp_client:send("4115", deliver_sm_resp, 7, []).
+smpp_client:send("4115", deliver_sm_resp, 8, []).
+
+smpp_client:stop("4115").
+
+%% Server
+%% ------
+smpp_simulator:restart().
+smpp_server:send_message(smpp_server_4115, 1, 41794519635, 4115, "this is a test").
+
+```
