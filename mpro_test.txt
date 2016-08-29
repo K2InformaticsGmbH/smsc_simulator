@@ -1,0 +1,6 @@
+smpp_client:start("4115",{127,0,0,1},4040).
+smpp_client:bind("4115").
+smpp_client:send("4115", "00 00 00 10 00 00 00 06 00 00 00 00 00 00 00 01").
+
+smpp_client:stop("4115").
+

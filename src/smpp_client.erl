@@ -4,7 +4,7 @@
 -include("logger.hrl").
 -include("smpp_parser/smpp_globals.hrl").
 
--export([start/3, stop/1, bind/1, send/4]).
+-export([start/3, stop/1, bind/1, send/2, send/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -12,7 +12,7 @@
 
 -record(state, {ip, port, sock, system_id, buffer}).
 
-start(SystemId, Ip, Port) ->
+start(SystemId, Ip, Port) when is_list(SystemId) ->
     {ok, Socket} = gen_tcp:connect(Ip, Port,
                                    [binary, {packet, 0}, {active, false}]),
     case gen_server:start({global, SystemId}, ?MODULE,
@@ -32,25 +32,31 @@ start(SystemId, Ip, Port) ->
             ?SYS_ERROR("~p failed to start ~p~n", [SystemId, Else])
     end.
 
-stop({global, _} = ServerRef) ->
+stop({global, SystemId} = ServerRef) when is_list(SystemId) ->
     ok = gen_server:stop(ServerRef);
-stop(SystemId) ->
+stop(SystemId)  when is_list(SystemId) ->
     stop({global, SystemId}).
 
-bind({global, SystemId} = ServerRef) ->
+bind({global, SystemId} = ServerRef) when is_list(SystemId) ->
     {ok, Bins} =
     smpp_operation:pack(
       {9,0,1,
        [{address_range,[]}, {addr_npi,0}, {addr_ton,0}, {interface_version,52},
-        {system_type,[]}, {password,"zuj_4115"}, {system_id,SystemId}]}),
+        {system_type,[]}, {password,"abcd123"}, {system_id,SystemId}]}),
     ok = gen_server:cast(ServerRef, list_to_binary(Bins));
-bind(SystemId) ->
+bind(SystemId) when is_list(SystemId) ->
     bind({global, SystemId}).
 
-send({global, _} = ServerRef, Cmd, Seq, Body) ->
+send(SystemId, Pdu) when is_list(Pdu), is_list(SystemId)  ->
+    PduBin = list_to_binary([list_to_integer(I,16)
+                             || I <- re:split(Pdu, " ", [{return, list}])]),
+    {ok, ParsedPdu} = smpp_operation:unpack(PduBin),
+    {Cmd, _, Seq, Body} = smpp_server:cmd(ParsedPdu),
+    send({global, SystemId}, Cmd, Seq, Body).
+send({global, SystemId} = ServerRef, Cmd, Seq, Body) when is_list(SystemId) ->
     {ok, Bins} = smpp_operation:pack(cmd({Cmd,0,Seq,Body})),
     ok = gen_server:cast(ServerRef, list_to_binary(Bins));
-send(SystemId, Cmd, Seq, Body) ->
+send(SystemId, Cmd, Seq, Body) when is_list(SystemId) ->
     send({global, SystemId}, Cmd, Seq, Body).
 
 init([SystemId, Ip, Port, Socket]) ->
@@ -67,8 +73,8 @@ handle_cast({_CmdId, _Status, _SeqNum, _Body} = Resp, State) ->
     RespBin = list_to_binary(BinList),
     handle_cast(RespBin, State);
 handle_cast(Pdu, State) when is_binary(Pdu) ->
-    {ok, Reply} = smpp_operation:unpack(Pdu),
-    ?SYS_INFO("Sending SMPP reply: ~p", [smpp_server:cmd(Reply)]),
+    {ok, Unpacked} = smpp_operation:unpack(Pdu),
+    ?SYS_INFO("Sending SMPP: ~p", [smpp_server:cmd(Unpacked)]),
     ok = gen_tcp:send(State#state.sock, Pdu),
     ok = inet:setopts(State#state.sock, [{active, once}]),
     {noreply, State};
@@ -82,7 +88,7 @@ handle_info(arm, State) ->
 handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock}) ->
     {Messages, Incomplete} = smpp_server:try_decode(Data, B),
     ok = inet:setopts(Sock, [{active, once}]),
-    [?SYS_INFO("RX : ~p~n", [Message]) || Message <- Messages],
+    [?SYS_INFO("RX : ~p~n", [smpp_server:cmd(Message)]) || Message <- Messages],
     {noreply, State#state{buffer = Incomplete}};
 handle_info({tcp_closed, Socket}, State = #state{sock = Socket, ip = Ip, port = Port}) ->
     catch gen_tcp:close(State#state.sock),

@@ -14,13 +14,9 @@
          code_change/3]).
 
 %% API
--export([start_link/1,
-         stop/1,
-         send_message/5,
-         try_decode/2, cmd/1]).
+-export([start_link/1, stop/1, send_message/5, try_decode/2, cmd/1]).
 
--record(state, {port,  % listening port
-                lsock, % listening socket
+-record(state, {lsock, % listening socket
                 sock,  % socket
                 trn,   % message number
                 status,
@@ -31,8 +27,8 @@
 %%% API
 %%%===================================================================
 
-start_link(LSock) ->
-    gen_server:start_link(?MODULE, [LSock], []).
+start_link(Port) ->
+    gen_server:start_link(?MODULE, [Port], []).
 
 stop(Server) ->
     gen_server:cast(Server, stop).
@@ -59,22 +55,32 @@ send_message(Server, Seq, Src, Dst, Msg)
 %%% gen_server callbacks
 %%%===================================================================
 
-init([LSock]) ->
-    ?SYS_INFO("Initializing SMPP server~n", []),
-    gen_server:cast(self(), accept),
+init([Port]) when is_integer(Port) ->
     process_flag(trap_exit, true),
-    {ok, #state{lsock = LSock, trn = 0}}.
+    {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false}]),
+    ?SYS_INFO("Listening on ~p : ~p", [Port, LSock]),
+    gen_server:cast(self(), accept),
+    {ok, #state{lsock = LSock, trn = 0}};
+init([Sock]) ->
+    process_flag(trap_exit, true),
+    ?SYS_INFO("Accepted: ~p", [Sock]),
+    {ok, #state{sock = Sock}}.
 
 handle_call(Msg, From, State) ->
     ?SYS_WARN("Unknown call from (~p): ~p", [From, Msg]),
     {reply, {ok, Msg}, State}.
 
-handle_cast(accept, State = #state{lsock = S}) ->
-    {ok, Sock} = gen_tcp:accept(S),
-    smpp_simulator:start_child(),
-    ?SYS_INFO("Accepting: ~p", [Sock]),
-    {noreply, State#state{sock = Sock}};
-
+handle_cast(accept, State = #state{lsock = LSock}) ->
+    ?SYS_INFO("Accepting: ~p", [LSock]),
+    {ok, Sock} = gen_tcp:accept(LSock),
+    {ok,  Pid} = gen_server:start(?MODULE, [Sock], []),
+    ok = gen_tcp:controlling_process(Sock, Pid),
+    ok = gen_server:cast(Pid, arm),
+    ok = gen_server:cast(self(), accept),
+    {noreply, State};
+handle_cast(arm, State = #state{sock = Sock}) ->
+    ok = inet:setopts(Sock, [{active,once}]),
+    {noreply, State};
 handle_cast({send_message, Msg}, State = #state{sock = Sock}) ->
     case catch send(Sock, Msg) of
         ok -> ok;
@@ -88,14 +94,10 @@ handle_cast(stop, State) ->
 handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock}) ->
     {Messages, Incomplete} = try_decode(Data, B),
     [handle_data(Sock, M) || M <- Messages],
+    ok = inet:setopts(Sock, [{active,once}]),
     {noreply, State#state{buffer = Incomplete}};
-
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     ?SYS_WARN("Socket ~p closed.", [Sock]),
-    case [P || P <- registered(), whereis(P) == self()] of
-        [_RegName] -> ok;
-        _ -> smpp_simulator:start_child()
-    end,
     {stop, normal, State};
 handle_info({tcp_closed, Socket}, State) ->
     ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
@@ -106,13 +108,15 @@ handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
-terminate(Reason, _State) ->
+terminate(Reason, #state{sock = Sock, lsock = undefined}) ->
     case [P || P <- registered(), whereis(P) == self()] of
         [RegName] ->
-            ?SYS_INFO("~p : ~p", [RegName, Reason]);
+            ?SYS_INFO("client down ~p : ~p : ~p", [RegName, Reason, Sock]);
         _ ->
-            ?SYS_INFO("~p", [Reason])
-    end.
+            ?SYS_INFO("client down ~p : ~p", [Reason, Sock])
+    end;
+terminate(Reason, #state{sock = undefined, lsock = LSock}) ->
+    ?SYS_INFO("server down ~p : ~p", [Reason, LSock]).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
