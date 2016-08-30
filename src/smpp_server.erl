@@ -14,13 +14,15 @@
          code_change/3]).
 
 %% API
--export([start_link/1, stop/1, send_message/5, try_decode/2, cmd/1]).
+-export([start_link/1, stop/1, send/2, send/4, try_decode/2,
+         auto_resp/1, auto_resp/2]).
 
 -record(state, {lsock, % listening socket
                 sock,  % socket
-                trn,   % message number
+                trn = 0,   % message number
                 status,
-                buffer % TCP buffer
+                buffer, % TCP buffer
+                auto_response = true
             }).
 
 %%%===================================================================
@@ -33,22 +35,45 @@ start_link(Port) ->
 stop(Server) ->
     gen_server:cast(Server, stop).
 
-send_message(Server, Seq, Src, Dst, Msg)
-  when is_integer(Seq), is_integer(Src), is_integer(Dst), is_list(Msg) ->
-    case whereis(Server) of
-        undefined -> ?SYS_ERROR("SMSC ~p is dead", [Server]);
-        Pid ->
-            {ok, Pdu} =
-            smpp_operation:pack(
-              {?COMMAND_ID_DELIVER_SM, 0, Seq,
-               [{short_message,Msg},{sm_default_msg_id,0},{data_coding,0},
-                {replace_if_present_flag,0},{registered_delivery,0},
-                {validity_period,[]},{schedule_delivery_time,[]},
-                {priority_flag,1},{protocol_id,0},{esm_class,0},
-                {destination_addr,integer_to_list(Dst)},{dest_addr_npi,1},
-                {dest_addr_ton,1},{source_addr, integer_to_list(Src)},
-                {source_addr_npi,1},{source_addr_ton,1},{service_type,[]}]}),
-            gen_server:cast(Pid, {send_message, list_to_binary(Pdu)})
+send(SystemId, Pdu) when is_integer(SystemId) ->
+    send(integer_to_list(SystemId), Pdu);
+send(SystemId, Pdu) when is_list(Pdu), is_list(SystemId)  ->
+    Pid = whereis(list_to_atom(
+                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
+    if is_pid(Pid) ->
+           PduBin = list_to_binary([list_to_integer(I,16)
+                                    || I <- re:split(Pdu, " ", [{return, list}])]),
+           {ok, ParsedPdu} = smpp_operation:unpack(PduBin),
+           {Cmd, _, Seq, Body} = smpp:cmd(ParsedPdu),
+           send(Pid, Cmd, Seq, Body);
+       true ->
+           ?SYS_ERROR("SMSC ~s is dead", [SystemId])
+    end.
+
+send(SystemId, Cmd, Seq, Body) when is_integer(SystemId) ->
+    send(integer_to_list(SystemId), Cmd, Seq, Body);
+send(SystemId, Cmd, Seq, Body) when is_list(SystemId) ->
+    Pid = whereis(list_to_atom(
+                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
+    if is_pid(Pid) -> send(Pid, Cmd, Seq, Body);
+       true -> ?SYS_ERROR("SMSC ~s is dead", [SystemId])
+    end;
+send(ServerPid, Cmd, Seq, Body) when is_pid(ServerPid) ->
+    {ok, Bins} = smpp_operation:pack(smpp:cmd({Cmd,0,Seq,Body})),
+    ok = gen_server:cast(ServerPid, {send_message, list_to_binary(Bins)}).
+
+auto_resp(SystemId) -> auto_resp(SystemId, undefined).
+auto_resp(SystemId, Value) when is_integer(SystemId) ->
+    auto_resp(integer_to_list(SystemId), Value);
+auto_resp(SystemId, Value) when is_list(SystemId) andalso
+                                (Value == true
+                                 orelse Value == false
+                                 orelse Value == undefined) ->
+    Pid = whereis(list_to_atom(
+                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
+    if is_pid(Pid) ->
+           gen_server:call(Pid, {auto_response, Value});
+       true -> ?SYS_ERROR("SMSC ~s is dead", [SystemId])
     end.
 
 %%%===================================================================
@@ -60,12 +85,19 @@ init([Port]) when is_integer(Port) ->
     {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false}]),
     ?SYS_INFO("Listening on ~p : ~p", [Port, LSock]),
     gen_server:cast(self(), accept),
-    {ok, #state{lsock = LSock, trn = 0}};
+    {ok, #state{lsock = LSock}};
 init([Sock]) ->
     process_flag(trap_exit, true),
     ?SYS_INFO("Accepted: ~p", [Sock]),
     {ok, #state{sock = Sock}}.
 
+handle_call({auto_response, AutoResponse}, _From, State) ->
+     case AutoResponse of
+         undefined ->
+             {reply, State#state.auto_response, State};
+         AutoResponse ->
+             {reply, {ok, AutoResponse}, State#state{auto_response = AutoResponse}}
+     end;
 handle_call(Msg, From, State) ->
     ?SYS_WARN("Unknown call from (~p): ~p", [From, Msg]),
     {reply, {ok, Msg}, State}.
@@ -82,7 +114,7 @@ handle_cast(arm, State = #state{sock = Sock}) ->
     ok = inet:setopts(Sock, [{active,once}]),
     {noreply, State};
 handle_cast({send_message, Msg}, State = #state{sock = Sock}) ->
-    case catch send(Sock, Msg) of
+    case catch send_low(Sock, Msg) of
         ok -> ok;
         Error -> ?SYS_ERROR("Send failed: ~p~n~p", [Msg, Error])
     end,
@@ -91,9 +123,10 @@ handle_cast({send_message, Msg}, State = #state{sock = Sock}) ->
 handle_cast(stop, State) ->
     {stop, normal, State}.
 
-handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock}) ->
+handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock,
+                                              auto_response = AutoResponse}) ->
     {Messages, Incomplete} = try_decode(Data, B),
-    [handle_data(Sock, M) || M <- Messages],
+    [handle_data(AutoResponse, Sock, M) || M <- Messages],
     ok = inet:setopts(Sock, [{active,once}]),
     {noreply, State#state{buffer = Incomplete}};
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
@@ -148,7 +181,7 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
         _ -> {PDUs, Buffer}
     end.
 
-handle_data(Socket, {C,_,_,B} = Pdu) ->
+handle_data(AutoResponse, Socket, {C,_,_,B} = Pdu) ->
     case lists:member(C, [?COMMAND_ID_BIND_RECEIVER,
                           ?COMMAND_ID_BIND_TRANSCEIVER,
                           ?COMMAND_ID_BIND_TRANSMITTER]) of
@@ -160,21 +193,25 @@ handle_data(Socket, {C,_,_,B} = Pdu) ->
             ?SYS_INFO("SMSC : ~p", [RegName]);
         false -> ok
     end,
-    ?SYS_INFO("Req : ~p", [cmd(Pdu)]),
-    case handle_message(Pdu) of
-        {reply, Resp} ->
-            try
-                {ok, BinList} = smpp_operation:pack(Resp),
-                RespBin = list_to_binary(BinList),
-                {ok, Reply} = smpp_operation:unpack(RespBin),
-                ?SYS_INFO("Sending SMPP reply: ~p", [cmd(Reply)]),
-                send(Socket, RespBin)
-            catch
-                _:Error ->
-                    ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
+    ?SYS_INFO("Req : ~p", [smpp:cmd(Pdu)]),
+    if AutoResponse == true ->
+           case handle_message(Pdu) of
+                {reply, Resp} ->
+                    try
+                        {ok, BinList} = smpp_operation:pack(Resp),
+                        RespBin = list_to_binary(BinList),
+                        {ok, Reply} = smpp_operation:unpack(RespBin),
+                        ?SYS_INFO("Sending SMPP reply: ~p", [smpp:cmd(Reply)]),
+                        send_low(Socket, RespBin)
+                    catch
+                        _:Error ->
+                            ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
+                    end;
+                _ ->
+                    inet:setopts(Socket, [{active, once}])
             end;
-        _ ->
-            inet:setopts(Socket, [{active, once}])
+       true ->
+           inet:setopts(Socket, [{active, once}])
     end.
 
 handle_message({CmdId,Status,SeqNum,Body}) ->
@@ -185,41 +222,6 @@ handle_message({CmdId,Status,SeqNum,Body}) ->
 handle_message(Pdu) ->
     {reply, Pdu}.
 
-send(S, Msg) ->
+send_low(S, Msg) ->
     gen_tcp:send(S, Msg),
     inet:setopts(S, [{active, once}]).
-
-cmd({?COMMAND_ID_UNBIND,                      S,SN,B})    -> {unbind,S,SN,B};
-cmd({?COMMAND_ID_OUTBIND,                     S,SN,B})    -> {outbind,S,SN,B};
-cmd({?COMMAND_ID_DATA_SM,                     S,SN,B})    -> {data_sm,S,SN,B};
-cmd({?COMMAND_ID_QUERY_SM,                    S,SN,B})    -> {query_sm,S,SN,B};
-cmd({?COMMAND_ID_CANCEL_SM,                   S,SN,B})    -> {cancel_sm,S,SN,B};
-cmd({?COMMAND_ID_SUBMIT_SM,                   S,SN,B})    -> {submit_sm,S,SN,B};
-cmd({?COMMAND_ID_REPLACE_SM,                  S,SN,B})    -> {replace_sm,S,SN,B};
-cmd({?COMMAND_ID_DELIVER_SM,                  S,SN,B})    -> {deliver_sm,S,SN,B};
-cmd({?COMMAND_ID_SUBMIT_MULTI,                S,SN,B})    -> {submit_multi,S,SN,B};
-cmd({?COMMAND_ID_BROADCAST_SM,                S,SN,B})    -> {broadcast_sm,S,SN,B};
-cmd({?COMMAND_ID_ENQUIRE_LINK,                S,SN,B})    -> {enquire_link,S,SN,B};
-cmd({?COMMAND_ID_GENERIC_NACK,                S,SN,B})    -> {generic_nack,S,SN,B};
-cmd({?COMMAND_ID_BIND_RECEIVER,               S,SN,B})    -> {bind_receiver,S,SN,B};
-cmd({?COMMAND_ID_BIND_TRANSCEIVER,            S,SN,B})    -> {bind_transceiver,S,SN,B};
-cmd({?COMMAND_ID_BIND_TRANSMITTER,            S,SN,B})    -> {bind_transmitter,S,SN,B};
-cmd({?COMMAND_ID_ALERT_NOTIFICATION,          S,SN,B})    -> {alert_notification,S,SN,B};
-cmd({?COMMAND_ID_QUERY_BROADCAST_SM,          S,SN,B})    -> {query_broadcast_sm,S,SN,B};
-cmd({?COMMAND_ID_CANCEL_BROADCAST_SM,         S,SN,B})    -> {cancel_broadcast_sm,S,SN,B};
-
-cmd({?COMMAND_ID_UNBIND_RESP,                 S,SN,B})    -> {unbind_resp,S,SN,B};
-cmd({?COMMAND_ID_DATA_SM_RESP,                S,SN,B})    -> {data_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_QUERY_SM_RESP,               S,SN,B})    -> {query_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_SUBMIT_SM_RESP,              S,SN,B})    -> {submit_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_CANCEL_SM_RESP,              S,SN,B})    -> {cancel_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_REPLACE_SM_RESP,             S,SN,B})    -> {replace_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_DELIVER_SM_RESP,             S,SN,B})    -> {deliver_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_SUBMIT_MULTI_RESP,           S,SN,B})    -> {submit_multi_resp,S,SN,B};
-cmd({?COMMAND_ID_BROADCAST_SM_RESP,           S,SN,B})    -> {broadcast_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_ENQUIRE_LINK_RESP,           S,SN,B})    -> {enquire_link_resp,S,SN,B};
-cmd({?COMMAND_ID_BIND_RECEIVER_RESP,          S,SN,B})    -> {bind_receiver_resp,S,SN,B};
-cmd({?COMMAND_ID_BIND_TRANSCEIVER_RESP,       S,SN,B})    -> {bind_transceiver_resp,S,SN,B};
-cmd({?COMMAND_ID_BIND_TRANSMITTER_RESP,       S,SN,B})    -> {bind_transmitter_resp,S,SN,B};
-cmd({?COMMAND_ID_QUERY_BROADCAST_SM_RESP,     S,SN,B})    -> {query_broadcast_sm_resp,S,SN,B};
-cmd({?COMMAND_ID_CANCEL_BROADCAST_SM_RESP,    S,SN,B})    -> {cancel_broadcast_sm_resp,S,SN,B}.
