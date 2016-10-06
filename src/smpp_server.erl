@@ -137,6 +137,21 @@ handle_info({tcp_closed, Socket}, State) ->
     {stop, normal, State};
 handle_info({'EXIT', _, Reason}, State) ->
     {stop, Reason, State};
+handle_info(check_send_deliver_sm, State) ->
+    case ets:first(get(name)) of
+        '$end_of_table' ->
+            self() ! check_send_deliver_sm;
+        SeqNum ->
+            [{SeqNum, Body}] = ets:lookup(get(name), SeqNum),
+            Pdu = {?COMMAND_ID_DELIVER_SM, ?ESME_ROK, SeqNum, Body},
+            ?SYS_INFO("DELIVER ~p", [Pdu]),
+            {ok, BinList} = smpp_operation:pack(Pdu),
+            RespBin = list_to_binary(BinList),
+            {ok, Reply} = smpp_operation:unpack(RespBin),
+            ?SYS_INFO("Sending SMPP request: ~p", [smpp:cmd(Reply)]),
+            send_low(State#state.sock, RespBin)
+    end,
+    {noreply, State};
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
@@ -181,17 +196,33 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
         _ -> {PDUs, Buffer}
     end.
 
-handle_data(AutoResponse, Socket, {C,_,_,B} = Pdu) ->
+handle_data(AutoResponse, Socket, {C,_,SN,B} = Pdu) ->
     case lists:member(C, [?COMMAND_ID_BIND_RECEIVER,
                           ?COMMAND_ID_BIND_TRANSCEIVER,
                           ?COMMAND_ID_BIND_TRANSMITTER]) of
         true ->
+            SysId = proplists:get_value(system_id,B),
+            TabName = lists:flatten([atom_to_list(?MODULE),"_", SysId]),
+            catch ets:new(list_to_atom(TabName), [named_table, public, ordered_set]),
             RegName = list_to_atom(
-                        lists:flatten([atom_to_list(?MODULE),"_",
-                                       proplists:get_value(system_id,B)])),
+                        TabName ++
+                        case C of
+                            ?COMMAND_ID_BIND_RECEIVER -> "_rx";
+                            ?COMMAND_ID_BIND_TRANSCEIVER -> "_trx";
+                            ?COMMAND_ID_BIND_TRANSMITTER -> "_tx"
+                        end),
             erlang:register(RegName, self()),
+            put(name, list_to_atom(TabName)),
+            if C == ?COMMAND_ID_BIND_RECEIVER ->
+                   self() ! check_send_deliver_sm;
+               true -> ok
+            end,
             ?SYS_INFO("SMSC : ~p", [RegName]);
-        false -> ok
+        false ->
+            if C == ?COMMAND_ID_SUBMIT_SM ->
+                   true = ets:insert(get(name), {SN, B});
+               true -> ok
+            end
     end,
     ?SYS_INFO("Req : ~p", [smpp:cmd(Pdu)]),
     if AutoResponse == true ->
@@ -215,9 +246,23 @@ handle_data(AutoResponse, Socket, {C,_,_,B} = Pdu) ->
     end.
 
 handle_message({CmdId,Status,SeqNum,Body}) ->
-    if CmdId band 16#80000000 == 0 ->
-           {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
-       true -> ignore
+    case CmdId of
+        CmdId when CmdId band 16#80000000 == 0 ->
+            {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
+        ?COMMAND_ID_DELIVER_SM_RESP ->
+            case catch ets:next(get(name),SeqNum) of
+                {'EXIT', _} ->
+                    true = ets:delete(get(name), SeqNum),
+                    ignore;
+                '$end_of_table' ->
+                    true = ets:delete(get(name), SeqNum),
+                    ignore;
+                NextSeqNum ->
+                    [{NextSeqNum, Body1}] = ets:lookup(get(name), NextSeqNum),
+                    true = ets:delete(get(name), SeqNum),
+                    {reply, {?COMMAND_ID_DELIVER_SM, ?ESME_ROK, NextSeqNum, Body1}}
+            end;
+        _ -> ignore
     end;
 handle_message(Pdu) ->
     {reply, Pdu}.
