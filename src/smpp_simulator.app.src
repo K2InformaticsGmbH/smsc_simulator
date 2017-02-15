@@ -1,7 +1,7 @@
 %% ex: ts=4 sw=4 et
 {application, smpp_simulator,
  [
-  {description, "SMPP protocol simulator"},
+  {description, "SMPP SMSC simulator"},
   {vsn, "1.0"},
   {registered, []},
   {applications, [
@@ -9,8 +9,5 @@
                   stdlib
                  ]},
   {mod, {smpp_simulator, []}},
-  {env, [
-            %% listening TCP port (default: 8888)
-            {listen_port, 8888}
-        ]}
+  {env, []}
  ]}.

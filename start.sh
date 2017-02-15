@@ -8,14 +8,6 @@ else
     #exename='erl.exe'
 fi
 
-listen_port="-smpp_simulator listen_port $1"
-cmd="$listen_port -s smpp_simulator_app"
-name="$1_smpp"
-if [ "$#" -lt 1 ]; then
-    cmd=""
-    name="client_smpp"
-fi
-
 MY_PATH="`dirname \"$0\"`"              # relative
 MY_PATH="`( cd \"$MY_PATH\" && pwd )`"  # absolutized and normalized
 if [ -z "$MY_PATH" ] ; then
@@ -24,4 +16,4 @@ if [ -z "$MY_PATH" ] ; then
   exit 1  # fail
 fi
 
-$exename -sname $name -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -boot start_sasl -s lager $cmd
+$exename -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -boot start_sasl -s lager -s smpp_simulator

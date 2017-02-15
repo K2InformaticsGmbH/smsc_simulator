@@ -14,8 +14,7 @@
          code_change/3]).
 
 %% API
--export([start_link/1, stop/1, send/2, send/4, try_decode/2,
-         auto_resp/1, auto_resp/2]).
+-export([start_link/1, stop/1, try_decode/2, name/1]).
 
 -record(state, {lsock, % listening socket
                 sock,  % socket
@@ -29,52 +28,12 @@
 %%% API
 %%%===================================================================
 
-start_link(Port) ->
-    gen_server:start_link(?MODULE, [Port], []).
+name(Port) -> list_to_atom(lists:concat([?MODULE,"_",Port])).
+start_link(Port) -> gen_server:start_link({local, name(Port)},
+                                          ?MODULE, [Port], []).
 
 stop(Server) ->
     gen_server:cast(Server, stop).
-
-send(SystemId, Pdu) when is_integer(SystemId) ->
-    send(integer_to_list(SystemId), Pdu);
-send(SystemId, Pdu) when is_list(Pdu), is_list(SystemId)  ->
-    Pid = whereis(list_to_atom(
-                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
-    if is_pid(Pid) ->
-           PduBin = list_to_binary([list_to_integer(I,16)
-                                    || I <- re:split(Pdu, " ", [{return, list}])]),
-           {ok, ParsedPdu} = smpp_operation:unpack(PduBin),
-           {Cmd, _, Seq, Body} = smpp:cmd(ParsedPdu),
-           send(Pid, Cmd, Seq, Body);
-       true ->
-           ?SYS_ERROR("SMSC ~s is dead", [SystemId])
-    end.
-
-send(SystemId, Cmd, Seq, Body) when is_integer(SystemId) ->
-    send(integer_to_list(SystemId), Cmd, Seq, Body);
-send(SystemId, Cmd, Seq, Body) when is_list(SystemId) ->
-    Pid = whereis(list_to_atom(
-                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
-    if is_pid(Pid) -> send(Pid, Cmd, Seq, Body);
-       true -> ?SYS_ERROR("SMSC ~s is dead", [SystemId])
-    end;
-send(ServerPid, Cmd, Seq, Body) when is_pid(ServerPid) ->
-    {ok, Bins} = smpp_operation:pack(smpp:cmd({Cmd,0,Seq,Body})),
-    ok = gen_server:cast(ServerPid, {send_message, list_to_binary(Bins)}).
-
-auto_resp(SystemId) -> auto_resp(SystemId, undefined).
-auto_resp(SystemId, Value) when is_integer(SystemId) ->
-    auto_resp(integer_to_list(SystemId), Value);
-auto_resp(SystemId, Value) when is_list(SystemId) andalso
-                                (Value == true
-                                 orelse Value == false
-                                 orelse Value == undefined) ->
-    Pid = whereis(list_to_atom(
-                    lists:flatten([atom_to_list(?MODULE),"_",SystemId]))),
-    if is_pid(Pid) ->
-           gen_server:call(Pid, {auto_response, Value});
-       true -> ?SYS_ERROR("SMSC ~s is dead", [SystemId])
-    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -105,7 +64,15 @@ handle_call(Msg, From, State) ->
 handle_cast(accept, State = #state{lsock = LSock}) ->
     ?SYS_INFO("Accepting: ~p", [LSock]),
     {ok, Sock} = gen_tcp:accept(LSock),
-    {ok,  Pid} = gen_server:start(?MODULE, [Sock], []),
+    {ok, {RIp, RPort}} = inet:peername(Sock),
+    {ok, {LIp, LPort}} = inet:sockname(Sock),
+    {ok,  Pid} =
+    gen_server:start_link(
+      {local, list_to_atom(
+                lists:concat(
+                  [inet:ntoa(RIp), ":", RPort, "-",
+                   inet:ntoa(LIp), ":", LPort]))},
+      ?MODULE, [Sock], []),
     ok = gen_tcp:controlling_process(Sock, Pid),
     ok = gen_server:cast(Pid, arm),
     ok = gen_server:cast(self(), accept),
