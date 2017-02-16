@@ -21,7 +21,8 @@
                 trn = 0,   % message number
                 status,
                 buffer, % TCP buffer
-                auto_response = true
+                auto_response = true,
+                name
             }).
 
 %%%===================================================================
@@ -45,14 +46,14 @@ init([Port]) when is_integer(Port) ->
     {ok, {Ip, Port}} = inet:sockname(LSock),
     ?SYS_INFO("Listening ~s:~p", [inet:ntoa(Ip), Port]),
     gen_server:cast(self(), accept),
-    {ok, #state{lsock = LSock}};
-init([Sock]) ->
+    {ok, #state{lsock = LSock, name = name(Port)}};
+init([Name, Sock]) ->
     process_flag(trap_exit, true),
     {ok, {RIp, RPort}} = inet:peername(Sock),
     {ok, {LIp, LPort}} = inet:sockname(Sock),
     ?SYS_INFO("Connect ~s:~p -> ~s:~p",
               [inet:ntoa(RIp), RPort, inet:ntoa(LIp), LPort]),
-    {ok, #state{sock = Sock}}.
+    {ok, #state{name = Name, sock = Sock}}.
 
 handle_call({auto_response, AutoResponse}, _From, State) ->
      case AutoResponse of
@@ -67,17 +68,16 @@ handle_call(Msg, From, State) ->
 
 handle_cast(accept, State = #state{lsock = LSock}) ->
     {ok, {Ip, Port}} = inet:sockname(LSock),
-    ?SYS_INFO("Accepting on  ~s:~p", [inet:ntoa(Ip), Port]),
+    ?SYS_INFO("Accepting on ~s:~p", [inet:ntoa(Ip), Port]),
     {ok, Sock} = gen_tcp:accept(LSock),
     {ok, {RIp, RPort}} = inet:peername(Sock),
     {ok, {LIp, LPort}} = inet:sockname(Sock),
-    {ok,  Pid} =
-    gen_server:start_link(
-      {local, list_to_atom(
-                lists:concat(
-                  [inet:ntoa(RIp), ":", RPort, "-",
-                   inet:ntoa(LIp), ":", LPort]))},
-      ?MODULE, [Sock], []),
+    Name = list_to_atom(
+             lists:concat(
+               [inet:ntoa(RIp), ":", RPort, "-",
+                inet:ntoa(LIp), ":", LPort])),
+    {ok,  Pid} = gen_server:start_link({local, Name},
+                                       ?MODULE, [Name, Sock], []),
     ok = gen_tcp:controlling_process(Sock, Pid),
     ok = gen_server:cast(Pid, arm),
     ok = gen_server:cast(self(), accept),
@@ -101,14 +101,18 @@ handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock,
     [handle_data(AutoResponse, Sock, M) || M <- Messages],
     ok = inet:setopts(Sock, [{active,once}]),
     {noreply, State#state{buffer = Incomplete}};
-handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
-    ?SYS_WARN("Socket ~p closed.", [Sock]),
+handle_info({tcp_closed, Sock}, State = #state{name = Name, sock = Sock}) ->
+    ?SYS_WARN("Connection for ~p closed.", [Name]),
     {stop, normal, State};
 handle_info({tcp_closed, Socket}, State) ->
     ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
     {stop, normal, State};
-handle_info({'EXIT', _, Reason}, State) ->
-    {stop, Reason, State};
+handle_info({'EXIT', Pid, Reason}, State = #state{name = Name, sock = undefined}) ->
+    ?SYS_INFO("~p > ~p died, reason ~p",
+              [Name, element(2, process_info(Pid, registered_name)), Reason]),
+    {noreply, State};
+handle_info({'EXIT', Pid, Reason}, State = #state{lsock = undefined}) ->
+    {stop, {Pid, Reason}, State};
 handle_info(check_send_deliver_sm, State) ->
     case ets:first(get(name)) of
         '$end_of_table' ->
@@ -128,15 +132,10 @@ handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
-terminate(Reason, #state{sock = Sock, lsock = undefined}) ->
-    case [P || P <- registered(), whereis(P) == self()] of
-        [RegName] ->
-            ?SYS_INFO("client down ~p : ~p : ~p", [RegName, Reason, Sock]);
-        _ ->
-            ?SYS_INFO("client down ~p : ~p", [Reason, Sock])
-    end;
-terminate(Reason, #state{sock = undefined, lsock = LSock}) ->
-    ?SYS_INFO("server down ~p : ~p", [Reason, LSock]).
+terminate(Reason, #state{name = Name, lsock = undefined}) ->
+    ?SYS_INFO("client ~p down ~p", [Name, Reason]);
+terminate(Reason, #state{name = Name, sock = undefined}) ->
+    ?SYS_INFO("server ~p down ~p", [Name, Reason]).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
