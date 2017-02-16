@@ -1,5 +1,11 @@
 #!/bin/bash
 
+me=`basename "$0"`
+if [[ $# -ne 1 ]]; then
+    echo "usage : $me nde_id"
+    exit
+fi
+
 unamestr=`uname`
 if [[ "$unamestr" == 'Linux' ]]; then
      exename=erl
@@ -16,4 +22,4 @@ if [ -z "$MY_PATH" ] ; then
   exit 1  # fail
 fi
 
-$exename -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -boot start_sasl -s lager -s smpp_simulator
+$exename -name smpp_smsc$1@127.0.0.1 -setcookie smpp_smsc_simulator -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -boot start_sasl -s lager -s smpp_simulator

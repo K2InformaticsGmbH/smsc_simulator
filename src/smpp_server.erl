@@ -42,12 +42,16 @@ stop(Server) ->
 init([Port]) when is_integer(Port) ->
     process_flag(trap_exit, true),
     {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false}]),
-    ?SYS_INFO("Listening on ~p : ~p", [Port, LSock]),
+    {ok, {Ip, Port}} = inet:sockname(LSock),
+    ?SYS_INFO("Listening ~s:~p", [inet:ntoa(Ip), Port]),
     gen_server:cast(self(), accept),
     {ok, #state{lsock = LSock}};
 init([Sock]) ->
     process_flag(trap_exit, true),
-    ?SYS_INFO("Accepted: ~p", [Sock]),
+    {ok, {RIp, RPort}} = inet:peername(Sock),
+    {ok, {LIp, LPort}} = inet:sockname(Sock),
+    ?SYS_INFO("Connect ~s:~p -> ~s:~p",
+              [inet:ntoa(RIp), RPort, inet:ntoa(LIp), LPort]),
     {ok, #state{sock = Sock}}.
 
 handle_call({auto_response, AutoResponse}, _From, State) ->
@@ -62,7 +66,8 @@ handle_call(Msg, From, State) ->
     {reply, {ok, Msg}, State}.
 
 handle_cast(accept, State = #state{lsock = LSock}) ->
-    ?SYS_INFO("Accepting: ~p", [LSock]),
+    {ok, {Ip, Port}} = inet:sockname(LSock),
+    ?SYS_INFO("Accepting on  ~s:~p", [inet:ntoa(Ip), Port]),
     {ok, Sock} = gen_tcp:accept(LSock),
     {ok, {RIp, RPort}} = inet:peername(Sock),
     {ok, {LIp, LPort}} = inet:sockname(Sock),

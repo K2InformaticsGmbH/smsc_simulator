@@ -17,10 +17,35 @@ stop() -> application:stop(?MODULE).
 %% Application callbacks
 %% ===================================================================
 
+-record(router, {src, dst, pid}).
+
 start(_StartType, _StartArgs) ->
+    Slave = 'smpp_smsc_db@127.0.0.1',
+    case net_adm:ping(Slave) of
+        pong -> lager:info("DB node ~p", [Slave]);
+        pang ->
+            {ok, Slave} =
+            slave:start_link(
+              "127.0.0.1", smpp_smsc_db,
+              lists:concat(["-setcookie ", erlang:get_cookie()])),
+            ok = rpc:call(Slave, mnesia, start, []),
+            {ok, _} = rpc:call(Slave, mnesia, change_config, [extra_db_nodes, [node()]]),
+            RamCopies = rpc:call(Slave, mnesia, table_info, [schema, ram_copies]),
+            {atomic, ok} = rpc:call(
+                             Slave, mnesia, create_table,
+                             [router, [{ram_copies, RamCopies},
+                                       {attributes, record_info(fields, router)}]]),
+            lager:info("MASTER for DB node ~p", [Slave])
+    end,
+    ok = mnesia:start(),
+    {ok, _} = rpc:call(Slave, mnesia, change_config, [extra_db_nodes, [node()]]),
+    {atomic, ok} = mnesia:add_table_copy(router, node(), ram_copies),
+    yes = mnesia:force_load_table(router),
+    ok = mnesia:wait_for_tables([router], 1000),
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 stop(_State) ->
+    stopped = mnesia:stop(),
     ok.
 
 start_smsc(Port) ->
@@ -44,6 +69,7 @@ stop_smsc(Port) ->
 %% Supervisor callbacks
 %% ===================================================================
 init([]) ->
+    lager:info("table router copied to ~p", [mnesia:table_info(router, ram_copies)]),
     {ok, {#{strategy => simple_one_for_one, intensity => 1, period => 5},
           [#{id => smpp_server,
              start => {smpp_server, start_link, []},
