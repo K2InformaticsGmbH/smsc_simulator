@@ -2,7 +2,7 @@
 -behavior(gen_server).
 
 -include("logger.hrl").
--include("smpp_parser/smpp_globals.hrl").
+-include_lib("smpp_parser/src/smpp_globals.hrl").
 
 -export([start/3, stop/1, bind/1, send/2, send/4]).
 

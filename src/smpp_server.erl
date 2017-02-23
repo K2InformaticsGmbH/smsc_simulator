@@ -1,9 +1,10 @@
 -module(smpp_server).
 
 -include("logger.hrl").
--include("smpp_parser/smpp_globals.hrl").
+-include_lib("smpp_parser/src/smpp_globals.hrl").
 
 -behaviour(gen_server).
+-behaviour(ranch_protocol).
 
 %% gen_server callbacks
 -export([init/1,
@@ -14,46 +15,37 @@
          code_change/3]).
 
 %% API
--export([start_link/1, stop/1, try_decode/2, name/1]).
+-export([start_link/4, try_decode/2]).
 
--record(state, {lsock, % listening socket
-                sock,  % socket
+-record(state, {sock,  % socket
+                transport,
                 trn = 0,   % message number
                 status,
                 buffer, % TCP buffer
                 auto_response = true,
-                name
+                opts
             }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-name(Port) -> list_to_atom(lists:concat([?MODULE,"_",Port])).
-start_link(Port) -> gen_server:start_link({local, name(Port)},
-                                          ?MODULE, [Port], []).
-
-stop(Server) ->
-    gen_server:cast(Server, stop).
+start_link(Ref, Sock, Transport, Opts) ->
+    {ok, proc_lib:spawn_link(?MODULE, init, [{Ref, Sock, Transport, Opts}])}.
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init([Port]) when is_integer(Port) ->
-    process_flag(trap_exit, true),
-    {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false}]),
-    {ok, {Ip, Port}} = inet:sockname(LSock),
-    ?SYS_INFO("Listening ~s:~p", [inet:ntoa(Ip), Port]),
-    gen_server:cast(self(), accept),
-    {ok, #state{lsock = LSock, name = name(Port)}};
-init([Name, Sock]) ->
-    process_flag(trap_exit, true),
+init({Ref, Sock, Transport, Opts}) ->
+    ok = ranch:accept_ack(Ref),
     {ok, {RIp, RPort}} = inet:peername(Sock),
     {ok, {LIp, LPort}} = inet:sockname(Sock),
     ?SYS_INFO("Connect ~s:~p -> ~s:~p",
               [inet:ntoa(RIp), RPort, inet:ntoa(LIp), LPort]),
-    {ok, #state{name = Name, sock = Sock}}.
+    ok = Transport:setopts(Sock, [{active, once}]),
+    gen_server:enter_loop(
+      ?MODULE, [],
+      #state{sock = Sock, transport = Transport, opts = Opts}).
 
 handle_call({auto_response, AutoResponse}, _From, State) ->
      case AutoResponse of
@@ -66,79 +58,32 @@ handle_call(Msg, From, State) ->
     ?SYS_WARN("Unknown call from (~p): ~p", [From, Msg]),
     {reply, {ok, Msg}, State}.
 
-handle_cast(accept, State = #state{lsock = LSock}) ->
-    {ok, {Ip, Port}} = inet:sockname(LSock),
-    ?SYS_INFO("Accepting on ~s:~p", [inet:ntoa(Ip), Port]),
-    {ok, Sock} = gen_tcp:accept(LSock),
-    {ok, {RIp, RPort}} = inet:peername(Sock),
-    {ok, {LIp, LPort}} = inet:sockname(Sock),
-    Name = list_to_atom(
-             lists:concat(
-               [inet:ntoa(RIp), ":", RPort, "-",
-                inet:ntoa(LIp), ":", LPort])),
-    {ok,  Pid} = gen_server:start_link({local, Name},
-                                       ?MODULE, [Name, Sock], []),
-    ok = gen_tcp:controlling_process(Sock, Pid),
-    ok = gen_server:cast(Pid, arm),
-    ok = gen_server:cast(self(), accept),
-    {noreply, State};
-handle_cast(arm, State = #state{sock = Sock}) ->
-    ok = inet:setopts(Sock, [{active,once}]),
-    {noreply, State};
-handle_cast({send_message, Msg}, State = #state{sock = Sock}) ->
-    case catch send_low(Sock, Msg) of
-        ok -> ok;
-        Error -> ?SYS_ERROR("Send failed: ~p~n~p", [Msg, Error])
-    end,
-    {noreply, State};
-
 handle_cast(stop, State) ->
     {stop, normal, State}.
 
-handle_info({tcp, Sock, Data}, State = #state{buffer = B, sock = Sock,
-                                              auto_response = AutoResponse}) ->
+handle_info({send, Resp}, #state{sock = Sock, transport = Transport} = State) ->
+    ok = Transport:setopts(Sock, [{active,once}]),
+    ok = Transport:send(Sock, Resp),
+    {noreply, State};
+handle_info({tcp, Sock, Data},
+            State = #state{buffer = B, sock = Sock,
+                           transport = Transport,
+                           auto_response = AutoResponse}) ->
+    ok = Transport:setopts(Sock, [{active,once}]),
     {Messages, Incomplete} = try_decode(Data, B),
-    [handle_data(AutoResponse, Sock, M) || M <- Messages],
-    ok = inet:setopts(Sock, [{active,once}]),
+    [handle_data(AutoResponse, M) || M <- Messages],
     {noreply, State#state{buffer = Incomplete}};
-handle_info({tcp_closed, Sock}, State = #state{name = Name, sock = Sock}) ->
-    ?SYS_WARN("Connection for ~p closed.", [Name]),
+handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {stop, normal, State};
-handle_info({tcp_closed, Socket}, State) ->
-    ?SYS_WARN("Unknown socket ~p closed.", [Socket]),
-    {stop, normal, State};
-handle_info({'EXIT', Pid, Reason}, State = #state{name = Name, sock = undefined}) ->
-    ?SYS_INFO("~p > ~p died, reason ~p",
-              [Name, element(2, process_info(Pid, registered_name)), Reason]),
-    {noreply, State};
-handle_info({'EXIT', Pid, Reason}, State = #state{lsock = undefined}) ->
-    {stop, {Pid, Reason}, State};
-handle_info(check_send_deliver_sm, State) ->
-    case ets:first(get(name)) of
-        '$end_of_table' ->
-            self() ! check_send_deliver_sm;
-        SeqNum ->
-            [{SeqNum, Body}] = ets:lookup(get(name), SeqNum),
-            Pdu = {?COMMAND_ID_DELIVER_SM, ?ESME_ROK, SeqNum, Body},
-            ?SYS_INFO("DELIVER ~p", [Pdu]),
-            {ok, BinList} = smpp_operation:pack(Pdu),
-            RespBin = list_to_binary(BinList),
-            {ok, Reply} = smpp_operation:unpack(RespBin),
-            ?SYS_INFO("Sending SMPP request: ~p", [smpp:cmd(Reply)]),
-            send_low(State#state.sock, RespBin)
-    end,
-    {noreply, State};
+handle_info({tcp_error, _, Reason}, State) ->
+	{stop, Reason, State};
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
-terminate(Reason, #state{name = Name, lsock = undefined}) ->
-    ?SYS_INFO("client ~p down ~p", [Name, Reason]);
-terminate(Reason, #state{name = Name, sock = undefined}) ->
-    ?SYS_INFO("server ~p down ~p", [Name, Reason]).
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+terminate(_Reason, _State) -> ok.
+code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
@@ -158,7 +103,8 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
                 {ok, Pdu} ->
                     try_decode(NextPdus, PDUs++[Pdu]);
                 {error, CmdId, Status, SeqNum} ->
-                    ?SYS_ERROR("Error: {CmdId, Status, SeqNum} ~p", [{CmdId, Status, SeqNum}]),
+                    ?SYS_ERROR("Error: {CmdId, Status, SeqNum} ~p",
+                               [{CmdId, Status, SeqNum}]),
                     {PDUs, Buffer};
                 {'EXIT', Reason} ->
                     ?SYS_ERROR("Error: ~p", [Reason]),
@@ -167,77 +113,36 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
         _ -> {PDUs, Buffer}
     end.
 
-handle_data(AutoResponse, Socket, {C,_,SN,B} = Pdu) ->
-    case lists:member(C, [?COMMAND_ID_BIND_RECEIVER,
-                          ?COMMAND_ID_BIND_TRANSCEIVER,
-                          ?COMMAND_ID_BIND_TRANSMITTER]) of
-        true ->
+handle_data(true, {CmdId,_,_SN,B} = Pdu) ->
+    case CmdId of
+       CmdId when CmdId == ?COMMAND_ID_BIND_RECEIVER;
+                  CmdId == ?COMMAND_ID_BIND_TRANSCEIVER;
+                  CmdId == ?COMMAND_ID_BIND_TRANSMITTER ->
             SysId = proplists:get_value(system_id,B),
-            TabName = lists:flatten([atom_to_list(?MODULE),"_", SysId]),
-            catch ets:new(list_to_atom(TabName), [named_table, public, ordered_set]),
-            RegName = list_to_atom(
-                        TabName ++
-                        case C of
-                            ?COMMAND_ID_BIND_RECEIVER -> "_rx";
-                            ?COMMAND_ID_BIND_TRANSCEIVER -> "_trx";
-                            ?COMMAND_ID_BIND_TRANSMITTER -> "_tx"
-                        end),
-            erlang:register(RegName, self()),
-            put(name, list_to_atom(TabName)),
-            if C == ?COMMAND_ID_BIND_RECEIVER ->
-                   self() ! check_send_deliver_sm;
-               true -> ok
-            end,
-            ?SYS_INFO("SMSC : ~p", [RegName]);
-        false ->
-            if C == ?COMMAND_ID_SUBMIT_SM ->
-                   true = ets:insert(get(name), {SN, B});
-               true -> ok
-            end
+            smpp_simulator:add_route(default, SysId, self());
+        _ -> ok
     end,
-    ?SYS_INFO("Req : ~p", [smpp:cmd(Pdu)]),
-    if AutoResponse == true ->
-           case handle_message(Pdu) of
-                {reply, Resp} ->
-                    try
-                        {ok, BinList} = smpp_operation:pack(Resp),
-                        RespBin = list_to_binary(BinList),
-                        {ok, Reply} = smpp_operation:unpack(RespBin),
-                        ?SYS_INFO("Sending SMPP reply: ~p", [smpp:cmd(Reply)]),
-                        send_low(Socket, RespBin)
-                    catch
-                        _:Error ->
-                            ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
-                    end;
-                _ ->
-                    inet:setopts(Socket, [{active, once}])
+    case handle_message(Pdu) of
+        {reply, Resp} ->
+            try
+                {ok, BinList} = smpp_operation:pack(Resp),
+                RespBin = list_to_binary(BinList),
+                self() ! {send, RespBin}
+            catch
+                _:Error ->
+                    ?SYS_ERROR("Error: ~p:~p",
+                               [Error,erlang:get_stacktrace()])
             end;
-       true ->
-           inet:setopts(Socket, [{active, once}])
-    end.
+        _ -> ok
+    end;
+handle_data(false, _) -> ok.
 
 handle_message({CmdId,Status,SeqNum,Body}) ->
     case CmdId of
         CmdId when CmdId band 16#80000000 == 0 ->
             {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
-        ?COMMAND_ID_DELIVER_SM_RESP ->
-            case catch ets:next(get(name),SeqNum) of
-                {'EXIT', _} ->
-                    true = ets:delete(get(name), SeqNum),
-                    ignore;
-                '$end_of_table' ->
-                    true = ets:delete(get(name), SeqNum),
-                    ignore;
-                NextSeqNum ->
-                    [{NextSeqNum, Body1}] = ets:lookup(get(name), NextSeqNum),
-                    true = ets:delete(get(name), SeqNum),
-                    {reply, {?COMMAND_ID_DELIVER_SM, ?ESME_ROK, NextSeqNum, Body1}}
-            end;
+        ?COMMAND_ID_DELIVER_SM_RESP -> ignore;
         _ -> ignore
     end;
 handle_message(Pdu) ->
     {reply, Pdu}.
-
-send_low(S, Msg) ->
-    gen_tcp:send(S, Msg),
-    inet:setopts(S, [{active, once}]).

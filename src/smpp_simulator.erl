@@ -6,11 +6,13 @@
 
 -export([start/0,stop/0,restart/0]). % console
 -export([start/2, stop/1]). % application
--export([init/1]). % supervisor
--export([start_smsc/1,list_smscs/0,stop_smsc/1,list_sessions/1]). % smscs
+-export([init/1]). % application
+-export([start_smsc/1, list_smscs/0, stop_smsc/1, list_sessions/1,
+         all_routes/0, all_routes/1, add_route/2, add_route/3, route/1,
+         del_route/1]). % smscs
 
 restart() -> stop(), start().
-start() -> application:start(?MODULE).
+start() -> application:ensure_all_started(?MODULE).
 stop() -> application:stop(?MODULE).
 
 %% ===================================================================
@@ -18,60 +20,187 @@ stop() -> application:stop(?MODULE).
 %% ===================================================================
 
 -record(router, {src, dst, pid}).
+-define(SLAVE, 'smpp_smsc_db@127.0.0.1').
 
 start(_StartType, _StartArgs) ->
-    Slave = 'smpp_smsc_db@127.0.0.1',
-    case net_adm:ping(Slave) of
-        pong -> lager:info("DB node ~p", [Slave]);
+    Type =
+    case net_adm:ping(?SLAVE) of
+        pong ->
+            lager:info("starting peer for DB node ~p", [?SLAVE]),
+            peer;
         pang ->
-            {ok, Slave} =
+            {ok, ?SLAVE} =
             slave:start_link(
               "127.0.0.1", smpp_smsc_db,
               lists:concat(["-setcookie ", erlang:get_cookie()])),
-            ok = rpc:call(Slave, mnesia, start, []),
-            {ok, _} = rpc:call(Slave, mnesia, change_config, [extra_db_nodes, [node()]]),
-            RamCopies = rpc:call(Slave, mnesia, table_info, [schema, ram_copies]),
+            {ok, Ps} = init:get_argument(pa),
+            Paths = lists:merge(Ps),
+            ok = rpc:call(?SLAVE, code, add_pathsa, [Paths]),
+            {ok, _} = rpc:call(?SLAVE, application, ensure_all_started, [lager]),
+            ok = rpc:call(?SLAVE, mnesia, start, []),
+            {ok, _} = rpc:call(?SLAVE, mnesia, change_config,
+                               [extra_db_nodes, [node()]]),
+            RamCopies = rpc:call(?SLAVE, mnesia, table_info,
+                                 [schema, ram_copies]),
             {atomic, ok} = rpc:call(
-                             Slave, mnesia, create_table,
-                             [router, [{ram_copies, RamCopies},
-                                       {attributes, record_info(fields, router)}]]),
-            lager:info("MASTER for DB node ~p", [Slave])
+                             ?SLAVE, mnesia, create_table,
+                             [router,
+                              [{ram_copies, RamCopies},
+                               {attributes, record_info(fields, router)}]]),
+            erlang:spawn_link(?SLAVE, fun fix_routes/0),
+            %erlang:spawn_link(?SLAVE, fun() -> io:format("!!!! NODE ~p~n", [node()]) end),
+            lager:info("starting MASTER for DB node ~p", [?SLAVE]),
+            master
     end,
     ok = mnesia:start(),
-    {ok, _} = rpc:call(Slave, mnesia, change_config, [extra_db_nodes, [node()]]),
+    {ok, _} = rpc:call(?SLAVE, mnesia, change_config,
+                       [extra_db_nodes, [node()]]),
     {atomic, ok} = mnesia:add_table_copy(router, node(), ram_copies),
     yes = mnesia:force_load_table(router),
     ok = mnesia:wait_for_tables([router], 1000),
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    {ok, SupPid} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
+    {ok, SupPid, Type}.
 
-stop(_State) ->
-    stopped = mnesia:stop(),
-    ok.
+stop(master) ->
+    lager:info("stopping DB master"),
+    spawn(
+      fun() ->
+              stopped = mnesia:stop(),
+              lager:info("stopped mnesia")
+      end),
+    slave:stop(?SLAVE),
+    lager:info("stopped salve ~p", [?SLAVE]);
+stop(peer) ->
+    lager:info("stopping non DB master"),
+    spawn(
+      fun() ->
+              stopped = mnesia:stop(),
+              lager:info("stopped mnesia")
+      end).
+
+%% ===================================================================
+
+fix_routes() ->
+    mnesia:subscribe({table, router, detailed}),
+    lager:info("subscribed to routing table chnages..."),
+    fix_routes_events().
+
+fix_routes_events() ->
+    receive
+        Event ->
+           case catch fix_routes_events(Event) of
+               {'EXIT', Error} ->
+                   lager:error("fix_routes_events(~p)~n~n~p~n~n~p",
+                               [Event, Error, erlang:get_stacktrace()]);
+               _ -> ok
+           end,
+           fix_routes_events()
+    end.
+fix_routes_events(
+  {mnesia_table_event,
+   {write, router, #router{src = {default, Dst}, dst = Dst, pid = Pids}, _, _}}) ->
+    case [P || P <- Pids, rpc:call(node(P), erlang, is_process_alive, [P]) == true] of
+        Pids ->
+            lager:info("updating for dst ~p with ~p", [Dst, Pids]),
+            case mnesia:dirty_select(
+                   router, [{#router{src = '$1', dst = Dst, _='_'},
+                             [{'/=','$1',{{default, Dst}}}],
+                             ['$1']}]) of
+                [] -> lager:info("no source for dst ~p with ~p", [Dst, Pids]);
+                Routes when length(Routes) > 0 ->
+                    lists:foldl(
+                      fun(Src, [Pid|Acc]) ->
+                              ok = mnesia:dirty_write(#router{src = Src, dst = Dst,
+                                                              pid = Pid}),
+                              Acc++[Pid]
+                      end, Pids, Routes),
+                    lager:info("added ~p sources for dst ~p with ~p",
+                               [Routes, Dst, Pids])
+            end;
+        NewPids ->
+            ok = mnesia:dirty_write(#router{src = {default, Dst}, dst = Dst, pid = NewPids})
+    end;
+fix_routes_events({mnesia_table_event,
+                   {write, router, #router{src = Src, dst = Dst,
+                                           pid = undefined}, _, _}}) ->
+    case mnesia:dirty_select(
+           router, [{#router{src = {default, Dst}, dst = Dst, pid = '$1'},
+                     [], ['$1']}]) of
+        [] -> lager:info("no default route for ~p", [Dst]);
+        Pids when length(Pids) > 0 ->
+            case lists:usort(
+                   lists:foldl(
+                     fun(Pid, Acc) ->
+                        [{length(mnesia:dirty_select(
+                                   router, [{#router{dst = Dst, pid = Pid},
+                                             [], ['$_']}])), Pid} | Acc]
+                     end, [], lists:flatten(Pids))) of
+                [{_,Pid}|_] ->
+                    ok = mnesia:dirty_write(#router{src = Src, dst = Dst,
+                                                    pid = Pid}),
+                    lager:info("route ~p -> ~p : ~p", [Src, Dst, Pid]);
+                [] -> lager:info("no default route for ~p,~p", [Src, Dst])
+            end
+    end;
+fix_routes_events({mnesia_table_event, {write, router, _, _, _}}) ->
+    lager:info("ignore table write");
+fix_routes_events({mnesia_table_event,
+                   {delete, router, What, Olds, _}}) ->
+    lager:info("deleted ~p from ~p", [What, Olds]).
 
 start_smsc(Port) ->
-    supervisor:start_child(?MODULE, [Port]).
+    {ok, _} = ranch:start_listener(Port, 100, ranch_tcp, [{port, Port}],
+                                   smpp_server, []).
 
-list_smscs() ->
-    [element(2,process_info(P,registered_name))
-     || {_,P,_,_} <- supervisor:which_children(?MODULE)].
+stop_smsc(Port) -> ranch:stop_listener(Port).
 
-list_sessions(Port) ->
-    {links,Links} = process_info(whereis(smpp_server:name(Port)), links),
-    [element(2, process_info(L, registered_name))
-     || L <- Links,
-        is_pid(L),
-        element(2, process_info(L, registered_name)) /= ?MODULE].
+list_smscs() -> ranch:info().
 
-stop_smsc(Port) ->
-    supervisor:terminate_child(?MODULE, whereis(smpp_server:name(Port))).
+list_sessions(Port) -> ranch:procs(Port, connections).
+
+all_routes() ->
+    mnesia:dirty_select(router, [{#router{_ = '_'}, [], ['$_']}]).
+all_routes(DstShortId) ->
+    mnesia:dirty_select(router, [{#router{dst = DstShortId, _ = '_'}, [],
+                                  ['$_']}]).
+
+add_route(Src, Dst) when Src /= default ->
+    add_route(Src, Dst, undefined);
+add_route([Src|_] = Srcs, Dst) when is_list(Src) ->
+    [add_route(S, Dst, undefined) || S <- Srcs].
+add_route(default, Dst, Pid) when is_pid(Pid) ->
+    add_route(
+      {default, Dst}, Dst,
+      case mnesia:dirty_select(
+             router, [{#router{src = {default, Dst}, dst = Dst, pid = '$1'}, [],
+                       ['$1']}]) of
+          [Pids] when is_list(Pids) -> lists:usort([Pid | Pids]);
+          _ -> [Pid]
+      end);
+add_route(Src, Dst, Pid) when Pid == undefined; is_pid(Pid); is_list(Pid) ->
+    ok = mnesia:dirty_write(#router{src = Src, dst = Dst, pid = Pid}).
+
+del_route([Src|_] = Srcs) when is_list(Src) ->
+    [del_route(S) || S <- Srcs];
+del_route(Src) ->
+    ok = mnesia:dirty_delete(router, Src).
+
+route(Src) ->
+    case mnesia:dirty_select(
+           router, [{#router{src = Src, _ = '_'}, [], ['$1']}]) of
+        [#router{dst = Dst, pid = Pid}] when is_pid(Pid) ->
+            case is_alive_pid(Pid) of
+                true -> {ok, {Pid, Dst}};
+                _ -> no_route
+            end;
+        _ -> no_route
+    end.
+
+is_alive_pid(Pid) when is_pid(Pid) ->
+    rpc:call(node(Pid), erlang, is_process_alive, [Pid]).
 
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
 init([]) ->
-    lager:info("table router copied to ~p", [mnesia:table_info(router, ram_copies)]),
-    {ok, {#{strategy => simple_one_for_one, intensity => 1, period => 5},
-          [#{id => smpp_server,
-             start => {smpp_server, start_link, []},
-             restart => permanent, shutdown => 1000, type => worker,
-             modules => [smpp_server]}]}}.
+    {ok, {#{strategy => one_for_one, intensity => 10, period => 10}, []}}.

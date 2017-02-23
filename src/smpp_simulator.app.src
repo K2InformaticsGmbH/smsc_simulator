@@ -4,10 +4,7 @@
   {description, "SMPP SMSC simulator"},
   {vsn, "1.0"},
   {registered, []},
-  {applications, [
-                  kernel,
-                  stdlib
-                 ]},
+  {applications, [kernel, stdlib, sasl, ranch, smpp_parser]},
   {mod, {smpp_simulator, []}},
   {env, []}
  ]}.
