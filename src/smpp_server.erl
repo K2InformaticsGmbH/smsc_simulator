@@ -23,8 +23,9 @@
                 status,
                 buffer, % TCP buffer
                 auto_response = true,
-                opts
-            }).
+                opts,
+                conn = {{0,0,0,0},0,{0,0,0,0},0}
+               }).
 
 %%%===================================================================
 %%% API
@@ -40,12 +41,14 @@ init({Ref, Sock, Transport, Opts}) ->
     ok = ranch:accept_ack(Ref),
     {ok, {RIp, RPort}} = inet:peername(Sock),
     {ok, {LIp, LPort}} = inet:sockname(Sock),
-    ?SYS_INFO("Connect ~s:~p -> ~s:~p",
-              [inet:ntoa(RIp), RPort, inet:ntoa(LIp), LPort]),
+    RIpStr = inet:ntoa(RIp),
+    LIpStr = inet:ntoa(LIp),
+    ?SYS_INFO("Connect ~s:~p -> ~s:~p", [RIpStr, RPort, LIpStr, LPort]),
     ok = Transport:setopts(Sock, [{active, once}]),
     gen_server:enter_loop(
       ?MODULE, [],
-      #state{sock = Sock, transport = Transport, opts = Opts}).
+      #state{sock = Sock, transport = Transport, opts = Opts,
+             conn = {RIpStr, RPort, LIpStr, LPort}}).
 
 handle_call({auto_response, AutoResponse}, _From, State) ->
      case AutoResponse of
@@ -77,12 +80,19 @@ handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {stop, normal, State};
 handle_info({tcp_error, _, Reason}, State) ->
 	{stop, Reason, State};
+handle_info({mo, Mo}, #state{trn = Trn, sock = Sock, transport = Transport} = State) ->
+    {ok, Data} = smpp:pack(Mo#{sequence_number => Trn + 1}),
+    ok = Transport:setopts(Sock, [{active,once}]),
+    ok = Transport:send(Sock, Data),
+    {noreply, State#state{trn = Trn + 1}};
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, #state{conn = {RIpStr, RPort, LIpStr, LPort}}) ->
+    ?SYS_INFO("Disconnect ~s:~p -> ~s:~p", [RIpStr, RPort, LIpStr, LPort]).
+
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%%===================================================================
@@ -113,13 +123,25 @@ try_decode(<<CmdLen:32, Rest/binary>> = Buffer, PDUs) when is_list(PDUs) ->
         _ -> {PDUs, Buffer}
     end.
 
-handle_data(true, {CmdId,_,_SN,B} = Pdu) ->
+handle_data(true, {CmdId,_,_S,Body} = Pdu) ->
     case CmdId of
        CmdId when CmdId == ?COMMAND_ID_BIND_RECEIVER;
                   CmdId == ?COMMAND_ID_BIND_TRANSCEIVER;
                   CmdId == ?COMMAND_ID_BIND_TRANSMITTER ->
-            SysId = proplists:get_value(system_id,B),
+            SysId = proplists:get_value(system_id, Body),
             smpp_simulator:add_route(default, SysId, self());
+        ?COMMAND_ID_SUBMIT_SM ->
+            Src = proplists:get_value(destination_addr, Body),
+            Dst = proplists:get_value(source_addr, Body),
+            case smpp_simulator:route(Src, Dst) of
+                no_route -> ?SYS_ERROR("no route ~p -> ~p", [Src, Dst]);
+                Pid when is_pid(Pid) ->
+                    Msg = proplists:get_value(short_message, Body),
+                    Pid ! {mo, #{command_id => ?COMMAND_ID_DELIVER_SM,
+                                 command_status => ?ESME_ROK,
+                                 source_addr => Src, destination_addr => Dst,
+                                 short_message => Msg}}
+            end;
         _ -> ok
     end,
     case handle_message(Pdu) of
@@ -141,7 +163,6 @@ handle_message({CmdId,Status,SeqNum,Body}) ->
     case CmdId of
         CmdId when CmdId band 16#80000000 == 0 ->
             {reply, {CmdId bor 16#80000000, Status, SeqNum, Body}};
-        ?COMMAND_ID_DELIVER_SM_RESP -> ignore;
         _ -> ignore
     end;
 handle_message(Pdu) ->

@@ -8,7 +8,7 @@
 -export([start/2, stop/1]). % application
 -export([init/1]). % application
 -export([start_smsc/1, list_smscs/0, stop_smsc/1, list_sessions/1,
-         all_routes/0, all_routes/1, add_route/2, add_route/3, route/1,
+         all_routes/0, all_routes/1, add_route/2, add_route/3, route/2,
          del_route/1]). % smscs
 
 restart() -> stop(), start().
@@ -99,7 +99,7 @@ fix_routes_events() ->
 fix_routes_events(
   {mnesia_table_event,
    {write, router, #router{src = {default, Dst}, dst = Dst, pid = Pids}, _, _}}) ->
-    case [P || P <- Pids, rpc:call(node(P), erlang, is_process_alive, [P]) == true] of
+    case [P || P <- Pids, is_alive_pid(P) == true] of
         Pids ->
             lager:info("updating for dst ~p with ~p", [Dst, Pids]),
             case mnesia:dirty_select(
@@ -185,12 +185,12 @@ del_route([Src|_] = Srcs) when is_list(Src) ->
 del_route(Src) ->
     ok = mnesia:dirty_delete(router, Src).
 
-route(Src) ->
+route(Src, Dst) ->
     case mnesia:dirty_select(
-           router, [{#router{src = Src, _ = '_'}, [], ['$1']}]) of
-        [#router{dst = Dst, pid = Pid}] when is_pid(Pid) ->
+           router, [{#router{src = Src, dst = Dst, pid = '$1'}, [], ['$1']}]) of
+        [Pid] when is_pid(Pid) ->
             case is_alive_pid(Pid) of
-                true -> {ok, {Pid, Dst}};
+                true -> Pid;
                 _ -> no_route
             end;
         _ -> no_route
