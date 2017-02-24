@@ -1,4 +1,4 @@
--module(smpp_simulator).
+-module(smsc_simulator).
 -include("logger.hrl").
 
 -behaviour(application).

@@ -1,0 +1,10 @@
+%% ex: ts=4 sw=4 et
+{application, smsc_simulator,
+ [
+  {description, "SMPP/UCP SMSC simulator"},
+  {vsn, "1.0"},
+  {registered, []},
+  {applications, [kernel, stdlib, sasl, ranch, smpp_parser, ucp_parser]},
+  {mod, {smsc_simulator, []}},
+  {env, []}
+ ]}.

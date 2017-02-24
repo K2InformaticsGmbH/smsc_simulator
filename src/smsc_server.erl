@@ -1,4 +1,4 @@
--module(smpp_server).
+-module(smsc_server).
 
 -include("logger.hrl").
 -include_lib("smpp_parser/src/smpp_globals.hrl").
