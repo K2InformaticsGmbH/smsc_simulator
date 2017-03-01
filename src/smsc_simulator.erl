@@ -7,9 +7,8 @@
 -export([start/0,stop/0,restart/0]). % console
 -export([start/2, stop/1]). % application
 -export([init/1]). % application
--export([start_smsc/1, list_smscs/0, stop_smsc/1, list_sessions/1,
-         all_routes/0, all_routes/1, add_route/2, add_route/3, route/2,
-         del_route/1]). % smscs
+-export([list/0, list_sessions/1, all_routes/0, all_routes/1, add_route/2,
+         add_route/3, route/1, del_route/1]). % smscs
 
 restart() -> stop(), start().
 start() -> application:ensure_all_started(?MODULE).
@@ -22,6 +21,10 @@ stop() -> application:stop(?MODULE).
 -record(router, {src, dst, pid}).
 -define(SLAVE, 'smpp_smsc_db@127.0.0.1').
 
+
+start(Proto, Port) when Proto == smpp; Proto == ucp ->
+    {ok, _} = ranch:start_listener(Port, 100, ranch_tcp, [{port, Port}],
+                                   smsc_server, [Proto]);
 start(_StartType, _StartArgs) ->
     Type =
     case net_adm:ping(?SLAVE) of
@@ -76,7 +79,8 @@ stop(peer) ->
       fun() ->
               stopped = mnesia:stop(),
               lager:info("stopped mnesia")
-      end).
+      end);
+stop(Port) -> ranch:stop_listener(Port).
 
 %% ===================================================================
 
@@ -142,19 +146,15 @@ fix_routes_events({mnesia_table_event,
                 [] -> lager:info("no default route for ~p,~p", [Src, Dst])
             end
     end;
-fix_routes_events({mnesia_table_event, {write, router, _, _, _}}) ->
+fix_routes_events({mnesia_table_event,{write,router,_,_,_}}) ->
     lager:info("ignore table write");
 fix_routes_events({mnesia_table_event,
                    {delete, router, What, Olds, _}}) ->
-    lager:info("deleted ~p from ~p", [What, Olds]).
+    lager:info("deleted ~p from ~p", [What, Olds]);
+fix_routes_events({mnesia_table_event,{_,schema,_,_,_}}) ->
+    lager:info("ignore table schema events").
 
-start_smsc(Port) ->
-    {ok, _} = ranch:start_listener(Port, 100, ranch_tcp, [{port, Port}],
-                                   smpp_server, []).
-
-stop_smsc(Port) -> ranch:stop_listener(Port).
-
-list_smscs() -> ranch:info().
+list() -> ranch:info().
 
 list_sessions(Port) -> ranch:procs(Port, connections).
 
@@ -164,10 +164,10 @@ all_routes(DstShortId) ->
     mnesia:dirty_select(router, [{#router{dst = DstShortId, _ = '_'}, [],
                                   ['$_']}]).
 
-add_route(Src, Dst) when Src /= default ->
-    add_route(Src, Dst, undefined);
 add_route([Src|_] = Srcs, Dst) when is_list(Src) ->
-    [add_route(S, Dst, undefined) || S <- Srcs].
+    [add_route(S, Dst, undefined) || S <- Srcs];
+add_route(Src, Dst) when Src /= default ->
+    add_route(Src, Dst, undefined).
 add_route(default, Dst, Pid) when is_pid(Pid) ->
     add_route(
       {default, Dst}, Dst,
@@ -185,13 +185,13 @@ del_route([Src|_] = Srcs) when is_list(Src) ->
 del_route(Src) ->
     ok = mnesia:dirty_delete(router, Src).
 
-route(Src, Dst) ->
+route(Src) ->
     case mnesia:dirty_select(
-           router, [{#router{src = Src, dst = Dst, pid = '$1'}, [], ['$1']}]) of
+           router, [{#router{src = Src, pid = '$1', _ = '_'}, [], ['$1']}]) of
         [Pid] when is_pid(Pid) ->
             case is_alive_pid(Pid) of
                 true -> Pid;
-                _ -> no_route
+                _ -> no_forwarder
             end;
         _ -> no_route
     end.
