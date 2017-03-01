@@ -22,4 +22,4 @@ if [ -z "$MY_PATH" ] ; then
   exit 1  # fail
 fi
 
-$exename -name smpp_smsc$1@127.0.0.1 -setcookie smpp_smsc_simulator -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -sasl sasl_error_logger false -boot start_sasl -s lager -s smpp_simulator
+$exename -name smsc$1@127.0.0.1 -setcookie smsc_simulator -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -sasl sasl_error_logger false -boot start_sasl -s lager -s smsc_simulator
