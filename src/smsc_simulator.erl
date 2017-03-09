@@ -19,12 +19,20 @@ stop() -> application:stop(?MODULE).
 %% ===================================================================
 
 -record(router, {src, dst, pid}).
--define(SLAVE, 'smpp_smsc_db@127.0.0.1').
+-define(SLAVE,
+begin
+    [_,_Ip] = string:tokens(atom_to_list(node()), "@"),
+    list_to_atom("smsc_db@"++_Ip)
+end).
 
 
 start(Proto, Port) when Proto == smpp; Proto == ucp ->
-    {ok, _} = ranch:start_listener(Port, 100, ranch_tcp, [{port, Port}],
-                                   smsc_server, [Proto]);
+    [_,IpStr] = string:tokens(atom_to_list(node()), "@"),
+    {ok,Ip} = inet:getaddr(IpStr, inet),
+    {ok,_} = ranch:start_listener(
+                Port, 100, ranch_tcp,
+                [{ip, Ip}, {port, Port}],
+                smsc_server, [Proto]);
 start(_StartType, _StartArgs) ->
     Type =
     case net_adm:ping(?SLAVE) of
@@ -32,10 +40,11 @@ start(_StartType, _StartArgs) ->
             lager:info("starting peer for DB node ~p", [?SLAVE]),
             peer;
         pang ->
-            {ok, ?SLAVE} =
-            slave:start_link(
-              "127.0.0.1", smpp_smsc_db,
-              lists:concat(["-setcookie ", erlang:get_cookie()])),
+            [_,Ip] = string:tokens(atom_to_list(node()), "@"),
+            SlaveNode = ?SLAVE,
+            {ok, SlaveNode} =
+            slave:start_link(Ip, smsc_db,
+                             lists:concat(["-setcookie ", erlang:get_cookie()])),
             {ok, Ps} = init:get_argument(pa),
             Paths = lists:merge(Ps),
             ok = rpc:call(?SLAVE, code, add_pathsa, [Paths]),
