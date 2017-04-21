@@ -33,6 +33,16 @@ start(Proto, Port) when Proto == smpp; Proto == ucp ->
                 Port, 100, ranch_tcp,
                 [{ip, Ip}, {port, Port}],
                 smsc_server, [Proto]);
+start(tpi, {Port, DsPort}) ->
+    [_,IpStr] = string:tokens(atom_to_list(node()), "@"),
+    {ok,Ip} = inet:getaddr(IpStr, inet),
+    {ok,_} =
+    cowboy:start_clear(
+      Port, 100, [{ip, Ip}, {port, Port}],
+      #{env =>
+        #{dispatch =>
+          cowboy_router:compile([{'_', [{"/", smsc_server, DsPort}]}])
+         }});
 start(_StartType, _StartArgs) ->
     Type =
     case net_adm:ping(?SLAVE) of

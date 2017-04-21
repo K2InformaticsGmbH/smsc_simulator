@@ -15,6 +15,9 @@
          terminate/2,
          code_change/3]).
 
+%% TPI-Cowboy
+-export([init/2]).
+
 %% API
 -export([start_link/4]).
 
@@ -31,6 +34,7 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+
 start_link(Ref, Sock, Transport, [Proto]) ->
     {ok, proc_lib:spawn_link(?MODULE, init, [{Ref, Sock, Transport, Proto}])}.
 
@@ -80,22 +84,22 @@ handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {stop, normal, State};
 handle_info({tcp_error, _, Reason}, State) ->
 	{stop, Reason, State};
-handle_info({mo, Mo}, #state{trn = Trn, sock = Sock, transport = Transport,
-                             proto = smpp} = State) ->
-    {ok, Data} = smpp:pack(Mo#{sequence_number => Trn + 1}),
+handle_info({mo, Mo}, #state{proto = smpp, trn = Trn, sock = Sock,
+                             transport = Transport} = State) ->
+    {ok, Data} = smpp:pack(Mo#{sequence_number => Trn}),
     ok = Transport:setopts(Sock, [{active,once}]),
     ok = Transport:send(Sock, Data),
     {noreply, State#state{trn = Trn + 1}};
 handle_info({mo, Mo}, #state{trn = Trn, sock = Sock, transport = Transport,
                              proto = ucp} = State) ->
-    Data = list_to_binary(ucp:pack([{trn, Trn + 1} | Mo])),
+    Data = list_to_binary(ucp:pack([{trn, Trn} | Mo])),
     ok = Transport:setopts(Sock, [{active, once}]),
     ok = Transport:send(Sock, Data),
-    {noreply, State#state{trn = Trn + 1}};
+    {noreply, State#state{trn = if Trn + 1 > 99 -> (#state{})#state.trn;
+                                   true -> Trn + 1 end}};
 handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
-
 
 terminate(_Reason, #state{conn = {RIpStr, RPort, LIpStr, LPort}, proto = Proto}) ->
     ?SYS_INFO("[~p] disconnect ~s:~p -> ~s:~p", [Proto, RIpStr, RPort, LIpStr, LPort]).
@@ -192,3 +196,96 @@ handle_data(ucp, true, Pdu) ->
         "R" -> nop
     end;
 handle_data(_, false, _) -> ok.
+
+
+%%%===================================================================
+%%% TPI-Cowboy callbacks
+%%%===================================================================
+
+init(Req0 = #{method := <<"POST">>, has_body := true}, DsPort) ->
+    #{peer := {PeerIp,_}} = Req0,
+    {ok, Data, Req1} = cowboy_req:read_body(Req0),
+    {match, [ShortId, TrnId, FwdHost, Recipient]} =
+    re:run(Data,
+           "<short-id>([0-9]+)</short-id>.*"
+           "<transaction-id>([0-9]+)</transaction-id>.*"
+           "<report-address>([^ ]+)</report-address>.*"
+           "<recipient field=\"to\">([0-9]+)</recipient>",
+           [dotall, {capture, [1,2,3,4], list}]),
+    MsgId = erlang:unique_integer([positive]),
+    Req = cowboy_req:reply(
+            200, #{<<"content-type">> => <<"text/xml">>},
+            list_to_binary(
+                io_lib:format(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                    "<soapenv:Envelope>"
+                     "<soapenv:Body>"
+                         "<SMSSubmitResponse>"
+                             "<transaction-id>~s</transaction-id>"
+                             "<state>1000</state>"
+                             "<state-text>Ok</state-text>"
+                             "<message-id>~p</message-id>"
+                             "<message-state recipient=~p state=\"0\" state-text=\"Ok\"/>"
+                             "<message-type>SMSSubmitResponse</message-type>"
+                         "</SMSSubmitResponse>"
+                     "</soapenv:Body>"
+                    "</soapenv:Envelope>",
+                     [TrnId, MsgId, Recipient])), Req1),
+    Host = inet:ntoa(PeerIp),
+    % report
+    spawn(
+      fun() ->
+        Url = lists:concat(
+                ["http://",Host,":",DsPort,"/?ShortID=",ShortId,
+                 "&reportType=DELIVERY&msgId=",MsgId,"&recipient=",Recipient,
+                 "&msgState=0&msgStateText=Retrieved"]),
+        case catch httpc:request(get, {Url, [{"Connection","close"},
+                                             {"Host", FwdHost}]}, [], []) of
+            {ok, {{_, 200, _}, _, _}} -> ok;
+            {'EXIT', Error} -> lager:error("CRASH report ~p, ~p", [Url, Error]);
+            {error, Reason} -> lager:error("report ~p : ~p", [Url, Reason]);
+            {ok, {_, Code, _}, _, Body} ->
+                lager:info("ERROR report ~p : {~p,~s}", [Url, Code, Body])
+        end
+      end),
+
+    % delivery
+    spawn(
+      fun() ->
+        Url = lists:concat(["http://",Host,":",DsPort,"/deliver"]),
+        case catch httpc:request(
+                     post, {Url, [{"Connection","close"}, {"Host", FwdHost}],
+                            "multipart/related; boundary=part_boundary",
+            list_to_binary(
+                io_lib:format(
+                  "--part_boundary\r\n"
+                  "Content-Type: text/xml; charset=UTF-8\r\n"
+                  "Content-Transfer-Encoding: binary\r\n"
+                  "\r\n"
+                  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                  "<soapenv:Envelope>"
+                      "<soapenv:Body>"
+                          "<SMSDeliverRequest>"
+                              "<transaction-id>~s</transaction-id>"
+                              "<from>~s</from>"
+                              "<recipient>~s</recipient>"
+                              "<message-type>SMSDeliverRequest</message-type>"
+                          "</SMSDeliverRequest>"
+                      "</soapenv:Body>"
+                  "</soapenv:Envelope>\r\n"
+                  "\r\n"
+                  "--part_boundary\r\n"
+                  "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+                  "Content-Id: <0>\r\n"
+                  "\r\n"
+                  "~p\r\n"
+                  "--part_boundary--\r\n",
+                  [TrnId, Recipient, ShortId, os:timestamp()]))}, [], []) of
+            {ok, {{_, 200, _}, _, _}} -> ok;
+            {'EXIT', Error} -> lager:error("CRASH deliver ~p, ~p", [Url, Error]);
+            {error, Reason} -> lager:error("deliver ~p : ~p", [Url, Reason]);
+            {ok, {_, Code, _}, _, Body} ->
+                lager:info("ERROR deliver ~p : {~p,~s}", [Url, Code, Body])
+        end
+      end),
+    {ok, Req, DsPort}.

@@ -4,7 +4,8 @@
   {description, "SMPP/UCP SMSC simulator"},
   {vsn, "1.0"},
   {registered, []},
-  {applications, [kernel, stdlib, sasl, ranch, smpp_parser, ucp_parser]},
+  {applications, [kernel, stdlib, sasl, inets, ranch, smpp_parser, ucp_parser,
+                  cowlib, cowboy]},
   {mod, {smsc_simulator, []}},
   {env, []}
  ]}.
