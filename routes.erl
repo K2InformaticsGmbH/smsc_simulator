@@ -1,3 +1,9 @@
+smsc_simulator:add_route(["0790080001","0790080002"],"8000").
+smsc_simulator:add_route(["0790080011","0790080012"],"8001").
+
+smsc_simulator:del_route(["0790080001","0790080002",
+                          "0790080011","0790080012"]).
+
 smsc_simulator:add_route(["0790080031","0790080032"],"8003").
 smsc_simulator:add_route(["0790080041","0790080042"],"8004").
 smsc_simulator:add_route(["0790080051","0790080052"],"8005").
@@ -25,3 +31,27 @@ smsc_simulator:del_route([
 "0790080081","0790080082","0790070081","0790070082",
 "0790080091","0790080092","0790070091","0790070092",
 "0790080021","0790080022","0790070021","0790070022"]).
+
+
+smsc_simulator:add_route(["0790010000","0790010001"],"1000").
+smsc_simulator:add_route(["0790010010","0790010011"],"1001").
+smsc_simulator:add_route(["0790010020","0790010021"],"1002").
+smsc_simulator:add_route(["0790010030","0790010031"],"1003").
+smsc_simulator:add_route(["0790010040","0790010041"],"1004").
+smsc_simulator:add_route(["0790010050","0790010051"],"1005").
+smsc_simulator:add_route(["0790010060","0790010061"],"1006").
+smsc_simulator:add_route(["0790010070","0790010071"],"1007").
+smsc_simulator:add_route(["0790010080","0790010081"],"1008").
+smsc_simulator:add_route(["0790010090","0790010091"],"1009").
+
+smsc_simulator:add_route(["0790040000","0790040001"],"4000").
+smsc_simulator:add_route(["0790040010","0790040011"],"4001").
+smsc_simulator:add_route(["0790040020","0790040021"],"4002").
+smsc_simulator:add_route(["0790040030","0790040031"],"4003").
+smsc_simulator:add_route(["0790040040","0790040041"],"4004").
+smsc_simulator:add_route(["0790040050","0790040051"],"4005").
+smsc_simulator:add_route(["0790040060","0790040061"],"4006").
+smsc_simulator:add_route(["0790040070","0790040071"],"4007").
+smsc_simulator:add_route(["0790040080","0790040081"],"4008").
+smsc_simulator:add_route(["0790040090","0790040091"],"4009").
+
