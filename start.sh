@@ -1,5 +1,7 @@
 #!/bin/bash
 
+ck=smsc_simulator
+imemtyp=disc
 me=`basename "$0"`
 if [[ $# -lt 1 ]]; then
     echo "usage : $me nde_id [host_ip]"
@@ -11,6 +13,7 @@ if [[ $# -gt 1 ]]; then
     host=$2
 fi
 
+name=smsc$1@$host
 unamestr=`uname`
 if [[ "$unamestr" == 'Linux' ]]; then
      exename=erl
@@ -19,12 +22,41 @@ else
     #exename='erl.exe'
 fi
 
-MY_PATH="`dirname \"$0\"`"              # relative
-MY_PATH="`( cd \"$MY_PATH\" && pwd )`"  # absolutized and normalized
-if [ -z "$MY_PATH" ] ; then
-  # error; for some reason, the path is not accessible
-  # to the script (e.g. permissions re-evaled after suid)
-  exit 1  # fail
-fi
+# Node name
+node_name="-name $name"
 
-$exename -name smsc$1@$host -setcookie smsc_simulator -pa $MY_PATH/deps/*/ebin -pa $MY_PATH/ebin -sasl sasl_error_logger false -boot start_sasl -s lager -s smsc_simulator
+# Cookie
+cookie="-setcookie $ck"
+
+# PATHS
+paths="-pa"
+paths=$paths" _build/default/lib/*/ebin"
+
+# sasl opts
+sasl_opts="-sasl"
+sasl_opts=$sasl_opts"  sasl_error_logger false" 
+
+# boot
+boot="-boot"
+boot=$boot" start_sasl" 
+
+# apps
+apps="-s lager"
+apps=$apps""
+
+start_opts="$paths $cookie $node_name $sasl_opts $boot $apps"
+
+# CPRO start options
+echo "------------------------------------------"
+echo "Starting SMSC Simulator"
+echo "------------------------------------------"
+echo "Node Name : $node_name"
+echo "Cookie    : $cookie"
+echo "EBIN Path : $paths"
+echo "SASL      : $sasl_opts"
+echo "BOOT      : $boot"
+echo "APPS      : $apps"
+echo "------------------------------------------"
+
+# Starting cpro
+$exename $start_opts -s smsc_simulator
