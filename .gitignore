@@ -8,3 +8,5 @@ ebin/
 log/
 *.plt
 .rebar
+_build/
+rebar.lock

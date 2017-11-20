@@ -43,6 +43,9 @@ start(tpi, {Port, DsPort}) ->
         #{dispatch =>
           cowboy_router:compile([{'_', [{"/", smsc_server, DsPort}]}])
          }});
+start(tpi, BadArgs) ->
+    lager:error("bad TPI start parameters ~p", [BadArgs]),
+    error(badarg);
 start(_StartType, _StartArgs) ->
     Type =
     case net_adm:ping(?SLAVE) of
@@ -111,13 +114,11 @@ fix_routes() ->
 fix_routes_events() ->
     receive
         Event ->
-           case catch fix_routes_events(Event) of
-               {'EXIT', Error} ->
-                   lager:error("fix_routes_events(~p)~n~n~p~n~n~p",
-                               [Event, Error, erlang:get_stacktrace()]);
-               _ -> ok
-           end,
-           fix_routes_events()
+            try fix_routes_events(Event) catch _:Error ->
+                lager:error("fix_routes_events(~p)~n~n~p~n~n~p",
+                            [Event, Error, erlang:get_stacktrace()])
+            end,
+            fix_routes_events()
     end.
 fix_routes_events(
   {mnesia_table_event,
