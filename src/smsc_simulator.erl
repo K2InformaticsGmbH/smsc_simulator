@@ -73,7 +73,6 @@ start(_StartType, _StartArgs) ->
                               [{ram_copies, RamCopies},
                                {attributes, record_info(fields, router)}]]),
             erlang:spawn_link(?SLAVE, fun fix_routes/0),
-            %erlang:spawn_link(?SLAVE, fun() -> io:format("!!!! NODE ~p~n", [node()]) end),
             lager:info("starting MASTER for DB node ~p", [?SLAVE]),
             master
     end,
