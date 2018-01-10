@@ -38,7 +38,7 @@ start(tpi, {Port, DsPort}) ->
     {ok,Ip} = inet:getaddr(IpStr, inet),
     {ok,_} =
     cowboy:start_clear(
-      Port, 100, [{ip, Ip}, {port, Port}],
+      Port, [{ip, Ip}, {port, Port}],
       #{env =>
         #{dispatch =>
           cowboy_router:compile([{'_', [{"/", smsc_server, DsPort}]}])

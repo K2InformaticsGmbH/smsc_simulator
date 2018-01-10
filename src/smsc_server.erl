@@ -101,7 +101,9 @@ handle_info(Any, State) ->
     ?SYS_INFO("Unhandled message: ~p", [Any]),
     {noreply, State}.
 
-terminate(_Reason, #state{conn = {RIpStr, RPort, LIpStr, LPort}, proto = Proto}) ->
+terminate(_Reason, #state{conn = {RIpStr, RPort, LIpStr, LPort}, proto = Proto,
+                          sock = Sock, transport = Transport}) ->
+    catch Transport:close(Sock),
     ?SYS_INFO("[~p] disconnect ~s:~p -> ~s:~p", [Proto, RIpStr, RPort, LIpStr, LPort]).
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
@@ -139,7 +141,7 @@ try_decode(ucp, <<2, _/binary>> = Buffer, PDUs) when is_list(PDUs) ->
            {[Pdu || {_, Pdu} <- BinPduList] ++ PDUs, Rest}
    end.
 
-handle_data(smpp, true, {CmdId,Status,SeqNum,Body}) ->
+handle_data(smpp, true, {CmdId,_Status,SeqNum,Body}) ->
     case CmdId of
        CmdId when CmdId == ?COMMAND_ID_BIND_RECEIVER;
                   CmdId == ?COMMAND_ID_BIND_TRANSCEIVER;
@@ -162,10 +164,12 @@ handle_data(smpp, true, {CmdId,Status,SeqNum,Body}) ->
     end,
     if CmdId band 16#80000000 == 0 ->
            try
+                ?SYS_ERROR("Sending ?ESME_RALYBND : ~p", [?ESME_RALYBND]),
                {ok, BinList} = smpp_operation:pack(
-                                 {CmdId bor 16#80000000, Status, SeqNum, Body}),
+                                 {CmdId bor 16#80000000, ?ESME_RALYBND, SeqNum, Body}),
                RespBin = list_to_binary(BinList),
-               self() ! {send, RespBin}
+               self() ! {send, RespBin},
+               gen_server:cast(self(), stop)
            catch
                _:Error ->
                    ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
