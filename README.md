@@ -58,3 +58,29 @@ Message Routing management
 (smsc1@127.0.0.1)7> smsc_simulator:all_routes().
 []
 ```
+
+## Docker
+
+### Build Docker Image
+
+```bash
+cd smsc_simulator
+docker build -t smsc_simulator:latest .
+```
+
+### Run Docker Container (Example)
+
+Start a container and expose the ports for smpp and ucp:
+```bash
+docker run -ti --rm --name smsc1 \
+  -e NDE_ID=1 \
+  -p 10000:10000 \
+  -p 10001:10001 \
+  smsc_simulator:latest
+```
+
+Start the listeners for smpp and ucp when container is started:
+```erlang
+smsc_simulator:start(smpp,10000).
+smsc_simulator:start(ucp,10001).
+```
