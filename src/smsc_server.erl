@@ -168,7 +168,9 @@ handle_data(smpp, true, {CmdId,_Status,SeqNum,Body}) ->
                {ok, BinList} = smpp_operation:pack(
                                  {CmdId bor 16#80000000, ?ESME_RALYBND, SeqNum, Body}),
                RespBin = list_to_binary(BinList),
+               timer:sleep(1000 * rand:uniform(2)),
                self() ! {send, RespBin},
+               timer:sleep(1000 * rand:uniform(2)),
                gen_server:cast(self(), stop)
            catch
                _:Error ->
