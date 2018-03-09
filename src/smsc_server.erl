@@ -164,14 +164,14 @@ handle_data(smpp, true, {CmdId,_Status,SeqNum,Body}) ->
     end,
     if CmdId band 16#80000000 == 0 ->
            try
-                ?SYS_ERROR("Sending ?ESME_RALYBND : ~p", [?ESME_RALYBND]),
+               ?SYS_ERROR("Sending ?ESME_RALYBND : ~p", [?ESME_RALYBND]),
                {ok, BinList} = smpp_operation:pack(
                                  {CmdId bor 16#80000000, ?ESME_RALYBND, SeqNum, Body}),
                RespBin = list_to_binary(BinList),
                timer:sleep(1000 * rand:uniform(2)),
-               self() ! {send, RespBin},
-               timer:sleep(1000 * rand:uniform(2)),
-               gen_server:cast(self(), stop)
+               self() ! {send, RespBin}%,
+%               timer:sleep(1000 * rand:uniform(2)),
+%               gen_server:cast(self(), stop)
            catch
                _:Error ->
                    ?SYS_ERROR("Error: ~p:~p", [Error,erlang:get_stacktrace()])
