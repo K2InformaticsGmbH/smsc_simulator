@@ -162,9 +162,8 @@ handle_data(smpp, true, {CmdId,Status,SeqNum,Body}) ->
     end,
     if CmdId band 16#80000000 == 0 ->
            try
-               {ok, BinList} = smpp_operation:pack(
+               {ok, RespBin} = smpp_operation:pack(
                                  {CmdId bor 16#80000000, Status, SeqNum, Body}),
-               RespBin = list_to_binary(BinList),
                self() ! {send, RespBin}
            catch
                _:Error ->
