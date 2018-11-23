@@ -10,3 +10,4 @@ log/
 .rebar
 _build/
 rebar.lock
+*.crashdump
